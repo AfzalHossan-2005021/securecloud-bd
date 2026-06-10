@@ -217,12 +217,16 @@ __marimo__/
 # Streamlit
 .streamlit/secrets.toml
 
-# SecureCloud-BD specifics
-ml/models/saved/
-datasets/unsw_nb15/processed/
-datasets/cic_ids2017/processed/
+# SecureCloud-BD specifics — ignore generated/binary content, keep .gitkeep
+ml/models/saved/*
+!ml/models/saved/.gitkeep
+datasets/unsw_nb15/processed/*
+!datasets/unsw_nb15/processed/.gitkeep
+datasets/cic_ids2017/processed/*
+!datasets/cic_ids2017/processed/.gitkeep
 datasets/synthetic.csv
-attack-sim/results/
+attack-sim/results/*
+!attack-sim/results/.gitkeep
 siem/elasticsearch/secret.yaml   # never commit real credentials
 
 # LaTeX build artefacts
