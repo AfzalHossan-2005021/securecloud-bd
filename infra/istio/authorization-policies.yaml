@@ -1,0 +1,48 @@
+# Deny all traffic by default; allow only explicit paths
+apiVersion: security.istio.io/v1beta1
+kind: AuthorizationPolicy
+metadata:
+  name: deny-all
+  namespace: securecloud
+spec: {}
+---
+apiVersion: security.istio.io/v1beta1
+kind: AuthorizationPolicy
+metadata:
+  name: allow-threat-api
+  namespace: securecloud
+spec:
+  selector:
+    matchLabels:
+      app: threat-api
+  action: ALLOW
+  rules:
+    - from:
+        - source:
+            namespaces: ["securecloud", "siem", "ml"]
+      to:
+        - operation:
+            methods: ["POST", "GET"]
+            paths: ["/score", "/health", "/metrics"]
+---
+apiVersion: security.istio.io/v1beta1
+kind: AuthorizationPolicy
+metadata:
+  name: deny-all
+  namespace: ml
+spec: {}
+---
+apiVersion: security.istio.io/v1beta1
+kind: AuthorizationPolicy
+metadata:
+  name: allow-ml-infer
+  namespace: ml
+spec:
+  selector:
+    matchLabels:
+      app: ml-infer
+  action: ALLOW
+  rules:
+    - from:
+        - source:
+            namespaces: ["securecloud"]

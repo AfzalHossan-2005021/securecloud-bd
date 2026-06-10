@@ -1,0 +1,35 @@
+\section{Related Work}
+\label{sec:related}
+
+\subsection{Anomaly Detection in Network Traffic}
+Liu~et~al.~\cite{liu2008isolation} introduced Isolation Forest (iForest),
+which isolates anomalies by recursively partitioning the feature space and
+measuring the average path length needed to isolate a sample.
+iForest operates in $O(n \log n)$ time and is robust to high-dimensional data,
+making it well-suited for flow-level features.
+
+Recurrent autoencoder architectures have been applied to time-series anomaly
+detection~\cite{malhotra2016lstm}.
+An LSTM Autoencoder reconstructs normal sequences; anomalies produce large
+reconstruction errors.
+Unlike iForest, it captures temporal dependencies between consecutive flows,
+which is valuable for detecting slow-and-low attacks such as beaconing.
+
+\subsection{Kubernetes Security}
+Falco~\cite{falco2023} provides kernel-level syscall monitoring via eBPF,
+detecting runtime anomalies such as privilege escalation and unexpected
+shell spawning.
+OPA Gatekeeper~\cite{opa2023} enforces admission-time policies, preventing
+privileged containers and host-path mounts from entering the cluster.
+Istio~\cite{istio2023} provides automatic mTLS encryption and
+AuthorizationPolicy-based access control at the service mesh layer.
+Prior work~\cite{shamim2020xi} has demonstrated that these controls
+individually reduce attack success rates, but their joint effect with
+ML-based anomaly detection has not been systematically studied.
+
+\subsection{Ensemble Methods for IDS}
+Hybrid ensemble methods that combine tree-based and neural models have shown
+improved F1 scores on the NSL-KDD and UNSW-NB15 benchmarks~\cite{kim2020lstm}.
+Our work differs in that we target Kubernetes-native traffic features
+extracted by Zeek, and integrate the ensemble into a live SIEM pipeline
+rather than evaluating in an offline setting.

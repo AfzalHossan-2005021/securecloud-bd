@@ -1,0 +1,67 @@
+# Ansible playbook: Kubernetes reconnaissance simulation
+# Run from a Kali pod inside the cluster: ansible-playbook recon.yaml
+# PURPOSE: generate labelled traffic for ML training; run only in isolated lab env.
+---
+- name: Kubernetes Recon Simulation
+  hosts: localhost
+  gather_facts: false
+  vars:
+    target_namespace: securecloud
+    output_dir: /tmp/recon-results
+
+  tasks:
+    - name: Create output directory
+      file:
+        path: "{{ output_dir }}"
+        state: directory
+
+    - name: Enumerate cluster namespaces
+      command: kubectl get namespaces -o json
+      register: ns_out
+      ignore_errors: true
+
+    - name: Save namespace list
+      copy:
+        content: "{{ ns_out.stdout }}"
+        dest: "{{ output_dir }}/namespaces.json"
+
+    - name: Enumerate pods in target namespace
+      command: kubectl get pods -n {{ target_namespace }} -o json
+      register: pods_out
+      ignore_errors: true
+
+    - name: Save pod list
+      copy:
+        content: "{{ pods_out.stdout }}"
+        dest: "{{ output_dir }}/pods.json"
+
+    - name: Enumerate services
+      command: kubectl get services -n {{ target_namespace }} -o json
+      register: svc_out
+      ignore_errors: true
+
+    - name: Save service list
+      copy:
+        content: "{{ svc_out.stdout }}"
+        dest: "{{ output_dir }}/services.json"
+
+    - name: Enumerate secrets (expect denial with least-privilege SA)
+      command: kubectl get secrets -n {{ target_namespace }}
+      register: secrets_out
+      ignore_errors: true
+
+    - name: Log expected denial
+      debug:
+        msg: "Secret enumeration result: {{ secrets_out.rc }} (expected 1 — RBAC denial)"
+
+    - name: Port scan threat-api service
+      command: >
+        nmap -sS -p 80,443,8080,8081
+        threat-api.{{ target_namespace }}.svc.cluster.local
+      register: nmap_out
+      ignore_errors: true
+
+    - name: Save nmap output
+      copy:
+        content: "{{ nmap_out.stdout }}"
+        dest: "{{ output_dir }}/nmap_threat_api.txt"

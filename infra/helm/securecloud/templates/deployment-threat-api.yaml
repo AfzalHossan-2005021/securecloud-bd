@@ -1,0 +1,67 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: threat-api
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    app: threat-api
+    version: v1
+spec:
+  replicas: {{ .Values.threatApi.replicas }}
+  selector:
+    matchLabels:
+      app: threat-api
+  template:
+    metadata:
+      labels:
+        app: threat-api
+        version: v1
+    spec:
+      containers:
+        - name: threat-api
+          image: "{{ .Values.global.imageRegistry }}{{ .Values.threatApi.image }}:{{ .Values.threatApi.tag }}"
+          imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          ports:
+            - containerPort: {{ .Values.threatApi.port }}
+          env:
+            - name: MODEL_PATH
+              value: {{ .Values.threatApi.env.MODEL_PATH | quote }}
+            - name: LOG_LEVEL
+              value: {{ .Values.threatApi.env.LOG_LEVEL | quote }}
+            - name: ELASTICSEARCH_URL
+              value: {{ .Values.threatApi.env.ELASTICSEARCH_URL | quote }}
+            - name: IFOREST_WEIGHT
+              value: {{ .Values.mlInfer.models.iforestWeight | quote }}
+            - name: AE_WEIGHT
+              value: {{ .Values.mlInfer.models.autoencoderWeight | quote }}
+            - name: SCORE_THRESHOLD
+              value: {{ .Values.mlInfer.models.threshold | quote }}
+          volumeMounts:
+            - name: models
+              mountPath: /models
+              readOnly: true
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: {{ .Values.threatApi.port }}
+            initialDelaySeconds: 10
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: {{ .Values.threatApi.port }}
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          resources:
+            {{- toYaml .Values.threatApi.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+            runAsUser: 1000
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+      volumes:
+        - name: models
+          persistentVolumeClaim:
+            claimName: models-pvc

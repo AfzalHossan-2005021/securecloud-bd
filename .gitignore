@@ -216,3 +216,23 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# SecureCloud-BD specifics
+ml/models/saved/
+datasets/unsw_nb15/processed/
+datasets/cic_ids2017/processed/
+datasets/synthetic.csv
+attack-sim/results/
+siem/elasticsearch/secret.yaml   # never commit real credentials
+
+# LaTeX build artefacts
+paper/*.aux
+paper/*.bbl
+paper/*.blg
+paper/*.log
+paper/*.out
+paper/*.toc
+paper/*.pdf
+
+# Istio installer download
+istio-*/

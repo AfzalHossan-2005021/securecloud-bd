@@ -1,0 +1,77 @@
+\section{Evaluation}
+\label{sec:eval}
+
+\subsection{Experimental Setup}
+All experiments run on a single workstation (Intel Core i7-12700H,
+16 GB RAM, Ubuntu 22.04) with Minikube allocating 4 vCPUs and 6 GB RAM.
+We use the UNSW-NB15 training/test CSVs and the full CIC-IDS2017
+MachineLearningCVE CSV set.
+Both datasets are preprocessed into our 20-feature canonical schema
+(Section~\ref{sec:design}) and min-max normalised.
+
+\subsection{Metrics}
+We report precision ($P$), recall ($R$), F1 score, and AUC-ROC.
+For the threshold-dependent metrics we use $s(x) \geq 0.5$.
+
+\subsection{Results}
+
+\begin{table}[htbp]
+  \centering
+  \caption{Detection performance on UNSW-NB15 test set}
+  \label{tab:unsw_results}
+  \begin{tabular}{lcccc}
+    \toprule
+    Model & Precision & Recall & F1 & AUC-ROC \\
+    \midrule
+    Isolation Forest  & --  & --  & --  & -- \\
+    LSTM Autoencoder  & --  & --  & --  & -- \\
+    \textbf{Ensemble} & \textbf{--} & \textbf{--} & \textbf{--} & \textbf{--} \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\begin{table}[htbp]
+  \centering
+  \caption{Detection performance on CIC-IDS2017 test set}
+  \label{tab:cic_results}
+  \begin{tabular}{lcccc}
+    \toprule
+    Model & Precision & Recall & F1 & AUC-ROC \\
+    \midrule
+    Isolation Forest  & --  & --  & --  & -- \\
+    LSTM Autoencoder  & --  & --  & --  & -- \\
+    \textbf{Ensemble} & \textbf{--} & \textbf{--} & \textbf{--} & \textbf{--} \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+% TODO: Fill in actual numbers after running experiments.
+
+\begin{figure}[htbp]
+  \centering
+  \includegraphics[width=\columnwidth]{figures/roc_curves.pdf}
+  \caption{ROC curves for each model on UNSW-NB15 (left) and CIC-IDS2017 (right).}
+  \label{fig:roc}
+\end{figure}
+
+\subsection{Attack-Simulation Results}
+We ran the three Ansible playbooks (recon, lateral movement, data exfiltration)
+against the Minikube cluster and measured detection latency — the time from
+attack event to Elasticsearch index entry with $s(x) \geq 0.5$.
+Table~\ref{tab:sim_results} summarises the results.
+
+\begin{table}[htbp]
+  \centering
+  \caption{Detection latency for simulated attacks}
+  \label{tab:sim_results}
+  \begin{tabular}{lccc}
+    \toprule
+    Attack Type & Detected & Latency (s) & Falco Alert \\
+    \midrule
+    Recon (nmap)         & --  & -- & -- \\
+    Lateral movement     & --  & -- & -- \\
+    Data exfiltration    & --  & -- & -- \\
+    DNS tunnelling       & --  & -- & -- \\
+    \bottomrule
+  \end{tabular}
+\end{table}

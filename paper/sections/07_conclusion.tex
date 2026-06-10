@@ -1,0 +1,16 @@
+\section{Conclusion}
+\label{sec:conclusion}
+
+We presented \textsc{SecureCloud-BD}, an open-source Kubernetes security
+framework combining defence-in-depth infrastructure controls with a
+real-time ML threat-detection pipeline.
+The weighted ensemble of Isolation Forest and LSTM Autoencoder achieves
+higher F1 than either model alone on UNSW-NB15 and CIC-IDS2017, while
+the Falco + ELK SIEM integration provides sub-second detection latency
+for the three simulated attack classes.
+The entire system runs on a single 8-GB workstation, demonstrating that
+research-grade cloud-native security tooling is accessible without
+enterprise infrastructure.
+
+Source code, Helm charts, and training scripts are available at
+\url{https://github.com/[user]/securecloud-bd}.

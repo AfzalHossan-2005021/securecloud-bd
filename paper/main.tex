@@ -1,0 +1,66 @@
+\documentclass[10pt,conference]{IEEEtran}
+\IEEEoverridecommandlockouts
+
+\usepackage{cite}
+\usepackage{amsmath,amssymb,amsfonts}
+\usepackage{algorithmic}
+\usepackage{graphicx}
+\usepackage{textcomp}
+\usepackage{xcolor}
+\usepackage{hyperref}
+\usepackage{booktabs}
+\usepackage{multirow}
+\usepackage{listings}
+\usepackage{subcaption}
+
+\def\BibTeX{{\rm B\kern-.05em{\sc i\kern-.025em b}\kern-.08em
+    T\kern-.1667em\lower.7ex\hbox{E}\kern-.125emX}}
+
+\begin{document}
+
+\title{SecureCloud-BD: ML-Driven Anomaly Detection\\
+for Kubernetes-Native Cloud Workloads}
+
+\author{
+  \IEEEauthorblockN{Afzal Hossan}
+  \IEEEauthorblockA{\textit{Department of Computer Science} \\
+  \textit{[University Name]}\\
+  Dhaka, Bangladesh \\
+  afzalhossan2005021@gmail.com}
+}
+
+\maketitle
+
+\begin{abstract}
+Cloud-native workloads deployed on Kubernetes present a novel attack surface
+that static rule-based intrusion detection systems fail to capture adequately.
+We present \textsc{SecureCloud-BD}, a research-grade security framework that
+combines Isolation Forest and an LSTM Autoencoder in a weighted ensemble
+(weights 0.4 and 0.6 respectively) to detect anomalous network flows in real
+time. The system integrates Istio mTLS, OPA Gatekeeper policies, Falco runtime
+rules, and a full ELK-stack SIEM pipeline.
+Evaluated on UNSW-NB15 and CIC-IDS2017, the ensemble achieves a detection
+rate of \textbf{XX\%} with a false-positive rate of \textbf{XX\%}, outperforming
+baseline Isolation Forest by \textbf{XX} percentage points.
+All components run on a single 8-GB-RAM workstation using open-source tooling.
+\end{abstract}
+
+\begin{IEEEkeywords}
+Kubernetes security, anomaly detection, Isolation Forest, LSTM Autoencoder,
+Istio, Falco, OPA Gatekeeper, cloud-native
+\end{IEEEkeywords}
+
+% ------------------------------------------------------------------
+\input{sections/01_introduction}
+\input{sections/02_related_work}
+\input{sections/03_system_design}
+\input{sections/04_ml_pipeline}
+\input{sections/05_evaluation}
+\input{sections/06_discussion}
+\input{sections/07_conclusion}
+% ------------------------------------------------------------------
+
+\bibliographystyle{IEEEtran}
+\bibliography{references}
+
+\end{document}

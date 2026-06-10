@@ -1,0 +1,43 @@
+global:
+  namespace: securecloud
+  imageRegistry: ""          # leave empty for local minikube images
+  imagePullPolicy: IfNotPresent
+
+threatApi:
+  image: securecloud/threat-api
+  tag: latest
+  replicas: 1
+  port: 8080
+  resources:
+    requests:
+      cpu: "200m"
+      memory: "256Mi"
+    limits:
+      cpu: "500m"
+      memory: "512Mi"
+  env:
+    MODEL_PATH: /models
+    LOG_LEVEL: INFO
+    ELASTICSEARCH_URL: http://elasticsearch.siem.svc.cluster.local:9200
+
+mlInfer:
+  image: securecloud/ml-infer
+  tag: latest
+  replicas: 1
+  port: 8081
+  resources:
+    requests:
+      cpu: "500m"
+      memory: "1Gi"
+    limits:
+      cpu: "1000m"
+      memory: "2Gi"
+  models:
+    iforestWeight: 0.4
+    autoencoderWeight: 0.6
+    threshold: 0.5
+
+persistence:
+  models:
+    storageClass: standard
+    size: 2Gi

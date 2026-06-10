@@ -1,0 +1,86 @@
+\section{System Design}
+\label{sec:design}
+
+Figure~\ref{fig:architecture} shows the overall architecture of
+\textsc{SecureCloud-BD}.
+
+\begin{figure}[htbp]
+  \centering
+  \includegraphics[width=\columnwidth]{figures/architecture.pdf}
+  \caption{SecureCloud-BD system architecture.
+           Solid arrows show data flow; dashed arrows show control/alert flow.}
+  \label{fig:architecture}
+\end{figure}
+
+\subsection{Kubernetes Infrastructure Layer}
+The system runs on Minikube (local development) or k3s (production-like).
+Three namespaces are provisioned: \texttt{securecloud} (application workloads),
+\texttt{siem} (ELK stack and Falco), and \texttt{ml} (model inference).
+
+\textbf{Istio} is installed in minimal profile.
+\texttt{PeerAuthentication} resources enforce mTLS \textsc{STRICT} mode
+across all namespaces, ensuring all inter-pod communication is mutually
+authenticated and encrypted.
+\texttt{AuthorizationPolicy} resources implement a default-deny posture
+with explicit allow rules for the scoring API and Elasticsearch.
+
+\textbf{OPA Gatekeeper} enforces two constraints cluster-wide:
+(i) \texttt{K8sPSPrivilegedContainer} — rejects any Pod requesting
+\texttt{privileged: true}; and
+(ii) \texttt{K8sPSPHostFilesystem} — blocks host-path volume mounts.
+
+\subsection{Traffic Collection}
+Zeek monitors the cluster overlay network via a DaemonSet on each node.
+It produces TSV-format \texttt{conn.log} files containing the 20 features
+listed in Table~\ref{tab:features}.
+Filebeat picks up both Zeek logs and Falco JSON alerts and ships them
+to Logstash, which normalises and enriches events before indexing them
+in Elasticsearch.
+
+\subsection{SIEM Layer}
+Elasticsearch 8.x stores events in two index patterns:
+\texttt{securecloud-zeek-*} and \texttt{securecloud-falco-*}.
+Kibana dashboards provide real-time visualisation of anomaly scores,
+Falco alert rates, and connection volumes by namespace.
+Logstash enriches every event with the cluster name and Kubernetes
+pod/namespace metadata sourced from the Filebeat Kubernetes processor.
+
+\subsection{Threat Scoring API}
+The FastAPI service (\texttt{/score}) accepts batches of up to 10,000
+flow feature vectors and returns per-flow anomaly scores in [0, 1] and
+binary labels.
+The service is secured by Istio AuthorizationPolicy and exposes a
+Prometheus \texttt{/metrics} endpoint for scraping by the cluster's
+monitoring stack.
+
+\begin{table}[htbp]
+  \centering
+  \caption{Canonical 20-feature schema extracted from Zeek \texttt{conn.log}}
+  \label{tab:features}
+  \begin{tabular}{lll}
+    \toprule
+    \# & Feature & Description \\
+    \midrule
+    1  & duration          & Connection duration (s) \\
+    2  & orig\_bytes        & Bytes sent by originator \\
+    3  & resp\_bytes        & Bytes sent by responder \\
+    4  & orig\_pkts         & Packets sent by originator \\
+    5  & resp\_pkts         & Packets sent by responder \\
+    6  & orig\_ip\_bytes     & IP-level bytes from originator \\
+    7  & resp\_ip\_bytes     & IP-level bytes from responder \\
+    8  & missed\_bytes      & Reassembly gaps \\
+    9  & proto\_tcp         & Protocol = TCP (binary) \\
+    10 & proto\_udp         & Protocol = UDP (binary) \\
+    11 & proto\_icmp        & Protocol = ICMP (binary) \\
+    12 & conn\_state\_S0    & Connection state S0 \\
+    13 & conn\_state\_SF    & Connection state SF \\
+    14 & conn\_state\_REJ   & Connection state REJ \\
+    15 & conn\_state\_RSTO  & Connection state RSTO \\
+    16 & service\_http      & Service = HTTP/S (binary) \\
+    17 & service\_dns       & Service = DNS (binary) \\
+    18 & service\_ssl       & Service = SSL/TLS (binary) \\
+    19 & bytes\_per\_pkt\_orig & orig\_bytes / orig\_pkts \\
+    20 & bytes\_per\_pkt\_resp & resp\_bytes / resp\_pkts \\
+    \bottomrule
+  \end{tabular}
+\end{table}

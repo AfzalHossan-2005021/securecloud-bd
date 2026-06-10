@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: threat-api
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    app: threat-api
+spec:
+  selector:
+    app: threat-api
+  ports:
+    - name: http
+      port: 80
+      targetPort: {{ .Values.threatApi.port }}
+  type: ClusterIP

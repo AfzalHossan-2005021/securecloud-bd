@@ -1,0 +1,102 @@
+# Helm values for Falco (falcosecurity/falco chart)
+# Install: helm upgrade --install falco falcosecurity/falco -n siem -f siem/falco/falco-values.yaml
+
+tty: true
+
+driver:
+  kind: ebpf   # prefer eBPF over kernel module for portability
+
+falco:
+  grpc:
+    enabled: true
+    bind_address: "unix:///var/run/falco/falco.sock"
+    threadiness: 0
+
+  grpc_output:
+    enabled: true
+
+  json_output: true
+  json_include_output_property: true
+
+  log_stderr: true
+  log_syslog: false
+  log_level: info
+
+  file_output:
+    enabled: true
+    keep_alive: false
+    filename: /var/log/falco/falco.json
+
+  rules_file:
+    - /etc/falco/falco_rules.yaml
+    - /etc/falco/falco_rules.local.yaml
+    - /etc/falco/rules.d/securecloud_rules.yaml
+
+customRules:
+  securecloud_rules.yaml: |
+    - rule: Unexpected outbound network from pod
+      desc: Detect pods making outbound connections to unexpected external IPs
+      condition: >
+        outbound and
+        not fd.sip.name in (allowed_outbound_destinations) and
+        k8s.ns.name in (securecloud, ml, siem)
+      output: >
+        Unexpected outbound connection (pod=%k8s.pod.name ns=%k8s.ns.name
+        dest=%fd.rip:%fd.rport proto=%l4proto)
+      priority: WARNING
+      tags: [network, securecloud]
+
+    - rule: Sensitive file read in container
+      desc: Detect reads of /etc/passwd, /etc/shadow, or SSH keys inside pods
+      condition: >
+        open_read and
+        fd.name in (/etc/passwd, /etc/shadow, /root/.ssh/id_rsa) and
+        container
+      output: >
+        Sensitive file read (file=%fd.name pod=%k8s.pod.name ns=%k8s.ns.name
+        user=%user.name cmd=%proc.cmdline)
+      priority: CRITICAL
+      tags: [file, securecloud]
+
+    - rule: Shell spawned inside container
+      desc: Detect unexpected shell execution inside securecloud pods
+      condition: >
+        spawned_process and
+        shell_procs and
+        container and
+        k8s.ns.name in (securecloud, ml)
+      output: >
+        Shell spawned in pod (pod=%k8s.pod.name ns=%k8s.ns.name
+        shell=%proc.name parent=%proc.pname cmdline=%proc.cmdline)
+      priority: ERROR
+      tags: [process, securecloud]
+
+    - rule: Privilege escalation attempt
+      desc: Detect setuid/setgid execution inside pods
+      condition: >
+        execve and
+        (proc.aname=sudo or proc.aname=su) and
+        container and
+        k8s.ns.name in (securecloud, ml, siem)
+      output: >
+        Privilege escalation attempt (pod=%k8s.pod.name cmd=%proc.cmdline
+        user=%user.name)
+      priority: CRITICAL
+      tags: [privilege, securecloud]
+
+    - macro: allowed_outbound_destinations
+      condition: fd.sip.name in (elasticsearch.siem.svc.cluster.local,
+                                  logstash.siem.svc.cluster.local,
+                                  threat-api.securecloud.svc.cluster.local)
+
+tolerations:
+  - effect: NoSchedule
+    operator: Exists
+
+resources:
+  requests:
+    cpu: "100m"
+    memory: "256Mi"
+  limits:
+    cpu: "500m"
+    memory: "512Mi"

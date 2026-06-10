@@ -1,0 +1,36 @@
+\section{Discussion}
+\label{sec:discussion}
+
+\subsection{Limitations}
+
+\textbf{Single-node deployment.}
+Minikube does not replicate the network topology of a production multi-node
+cluster.
+In particular, east-west traffic between nodes traverses an overlay network
+that may differ from cloud provider CNI plugins (e.g., Cilium, Calico).
+
+\textbf{Contamination assumption.}
+The iForest contamination parameter is set globally at 5\%.
+In practice, attack prevalence varies widely across time and environment.
+An adaptive contamination estimator (e.g., via a sliding-window attack-rate
+estimator fed from confirmed Falco alerts) would improve calibration.
+
+\textbf{LSTM sequence length.}
+We use a fixed window of $T = 10$ flows.
+Slow exfiltration campaigns spanning hours would benefit from a longer
+context, but this increases memory and inference latency.
+
+\subsection{Future Work}
+
+\begin{enumerate}
+  \item \textbf{Online learning.} Update iForest and the AE continuously
+        as new labelled alerts accumulate, reducing concept drift.
+  \item \textbf{Graph-based features.} Encode pod-to-pod communication
+        as a dynamic graph and add GNN-derived centrality features to the
+        input vector.
+  \item \textbf{Federated learning.} Train across multiple clusters without
+        sharing raw flow data, preserving multi-tenancy isolation.
+  \item \textbf{Explainability.} Integrate SHAP values to surface which
+        features most contributed to each anomaly score, aiding analyst
+        triage.
+\end{enumerate}

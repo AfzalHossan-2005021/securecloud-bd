@@ -1,0 +1,50 @@
+\section{ML Pipeline}
+\label{sec:ml}
+
+\subsection{Isolation Forest}
+Isolation Forest partitions the feature space using random axis-aligned cuts.
+Anomalies require fewer partitions to isolate and therefore have shorter
+average path lengths.
+We convert raw decision-function scores to [0, 1] by min-max normalisation:
+\begin{equation}
+  s_{\text{IF}}(x) = \frac{f(x) - \max f}{\min f - \max f}
+  \label{eq:iforest_norm}
+\end{equation}
+where $f(\cdot)$ is the raw decision function.
+We set the contamination parameter to 5\% based on the observed attack
+ratio in the training splits of both datasets.
+
+\subsection{LSTM Autoencoder}
+The autoencoder uses a sequence-to-sequence architecture with two LSTM
+layers in the encoder (hidden sizes 64 and 32) and a mirrored decoder.
+Input windows of $T = 10$ consecutive flows are reconstructed; the
+reconstruction error is:
+\begin{equation}
+  e_t = \frac{1}{T \cdot d} \sum_{i=0}^{T-1} \| x_{t+i} - \hat{x}_{t+i} \|^2
+  \label{eq:recon_error}
+\end{equation}
+The anomaly threshold $\tau$ is set at the 95th percentile of $e_t$ on
+the training set.
+Scores are normalised to [0, 1] by dividing by $\tau$.
+
+\subsection{Weighted Ensemble}
+The final threat score is:
+\begin{equation}
+  s(x) = 0.4 \cdot s_{\text{IF}}(x) + 0.6 \cdot s_{\text{AE}}(x)
+  \label{eq:ensemble}
+\end{equation}
+A flow is classified as anomalous if $s(x) \geq 0.5$.
+The weights were selected by grid search over
+$\{(w_1, w_2) : w_1 + w_2 = 1,\; w_1 \in \{0.1, 0.2, \ldots, 0.9\}\}$
+on the UNSW-NB15 validation split, maximising F1.
+The autoencoder receives higher weight because temporal context provides
+a stronger signal for the slow attacks (beaconing, exfiltration) that
+dominate our threat model.
+
+\subsection{Training Protocol}
+Models are trained on the combined UNSW-NB15 training split (normal flows
+only; contamination is handled by the iForest hyperparameter).
+Training runs for up to 50 epochs with early stopping (patience = 5) on
+validation MSE.
+Both models are persisted to a Kubernetes PersistentVolume and mounted
+read-only into the scoring API pod.

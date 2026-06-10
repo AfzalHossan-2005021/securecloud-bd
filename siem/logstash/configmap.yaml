@@ -1,0 +1,78 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: logstash-config
+  namespace: siem
+data:
+  logstash.yml: |
+    http.host: "0.0.0.0"
+    xpack.monitoring.enabled: false
+
+  pipelines.yml: |
+    - pipeline.id: main
+      path.config: "/usr/share/logstash/pipeline/*.conf"
+
+  securecloud.conf: |
+    input {
+      beats {
+        port => 5044
+        ssl => false
+      }
+    }
+
+    filter {
+      if [type] == "falco" {
+        json {
+          source => "message"
+          target => "falco"
+        }
+        mutate {
+          add_field => {
+            "event.category" => "intrusion_detection"
+            "event.type"     => "alert"
+            "event.severity" => "%{[falco][priority]}"
+          }
+        }
+      }
+
+      if [type] == "zeek" {
+        csv {
+          columns => ["ts","uid","id.orig_h","id.orig_p","id.resp_h","id.resp_p",
+                      "proto","service","duration","orig_bytes","resp_bytes",
+                      "conn_state","local_orig","local_resp","missed_bytes",
+                      "history","orig_pkts","orig_ip_bytes","resp_pkts","resp_ip_bytes"]
+          separator => "\t"
+        }
+        date {
+          match => ["ts", "UNIX"]
+          target => "@timestamp"
+        }
+        mutate {
+          convert => {
+            "duration"       => "float"
+            "orig_bytes"     => "integer"
+            "resp_bytes"     => "integer"
+            "orig_pkts"      => "integer"
+            "resp_pkts"      => "integer"
+            "orig_ip_bytes"  => "integer"
+            "resp_ip_bytes"  => "integer"
+          }
+        }
+      }
+
+      # Enrich every event with cluster metadata
+      mutate {
+        add_field => {
+          "kubernetes.cluster" => "securecloud-local"
+        }
+      }
+    }
+
+    output {
+      elasticsearch {
+        hosts  => ["http://elasticsearch.siem.svc.cluster.local:9200"]
+        index  => "securecloud-%{type}-%{+YYYY.MM.dd}"
+        user   => "elastic"
+        password => "${ELASTIC_PASSWORD}"
+      }
+    }

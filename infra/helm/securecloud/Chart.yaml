@@ -1,0 +1,13 @@
+apiVersion: v2
+name: securecloud
+description: SecureCloud-BD — ML-driven Kubernetes threat detection
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+keywords:
+  - security
+  - kubernetes
+  - anomaly-detection
+  - mlops
+maintainers:
+  - name: Afzal Hossan

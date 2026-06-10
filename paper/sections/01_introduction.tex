@@ -1,0 +1,41 @@
+\section{Introduction}
+\label{sec:intro}
+
+The rapid adoption of Kubernetes as the de-facto container orchestration
+platform has introduced a complex, dynamic attack surface.
+Unlike traditional datacenter environments, Kubernetes clusters feature
+ephemeral workloads, lateral-movement-friendly overlay networks, and
+shared kernel namespaces that static signature-based intrusion detection
+systems (IDS) struggle to monitor effectively~\cite{sysdig2023threat}.
+
+Anomaly-based detection offers a complementary approach: by learning what
+\textit{normal} traffic looks like, it can flag deviations without relying
+on prior knowledge of attack signatures.
+However, real-world Kubernetes traffic is highly heterogeneous, combining
+short-lived DNS probes, long-duration TLS sessions, and bursty microservice
+calls within the same namespace.
+A single model class is unlikely to capture all anomalous patterns.
+
+\textbf{Contributions.}
+\begin{enumerate}
+  \item We propose a \emph{weighted ensemble} of Isolation Forest (weight 0.4)
+        and an LSTM Autoencoder (weight 0.6) that exploits both structural
+        and temporal anomalies in network flows.
+  \item We describe a fully integrated Kubernetes security stack—Istio mTLS,
+        OPA Gatekeeper, Falco, and an ELK SIEM—that provides defence-in-depth
+        around the ML detector.
+  \item We provide an open-source implementation that runs on a single
+        8-GB workstation, making the system accessible to researchers and
+        small-to-medium enterprises.
+  \item We evaluate the system on UNSW-NB15~\cite{moustafa2015unsw} and
+        CIC-IDS2017~\cite{sharafaldin2018toward} and report precision, recall,
+        F1, and AUC-ROC for each component and the ensemble.
+\end{enumerate}
+
+The remainder of the paper is structured as follows.
+Section~\ref{sec:related} surveys related work.
+Section~\ref{sec:design} describes the system architecture.
+Section~\ref{sec:ml} details the ML pipeline.
+Section~\ref{sec:eval} presents experimental results.
+Section~\ref{sec:discussion} discusses limitations and future work.
+Section~\ref{sec:conclusion} concludes.
