@@ -1,0 +1,125 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# filebeat-rbac.yaml
+#
+# RBAC resources for the Filebeat DaemonSet.
+#
+# Why Filebeat needs cluster-wide API access:
+#
+#   Filebeat's kubernetes autodiscover provider subscribes to the Kubernetes
+#   watch API to discover pod start/stop events.  Without this, Filebeat cannot
+#   attach metadata (pod name, labels, namespace, deployment name) to log events.
+#
+#   The DaemonSet runs one Filebeat pod per node; each pod uses `scope: node` in
+#   its autodiscover config so it only watches pods scheduled on its own node.
+#   However, to look up namespace labels and node metadata, list/watch access at
+#   the cluster level is still required.
+#
+# Permission rationale (each resource justified):
+#
+#   namespaces    get/list/watch — autodiscover enriches events with namespace
+#                 labels (e.g. kubernetes.namespace.labels); also needed to
+#                 resolve namespace names from UIDs in API responses.
+#
+#   pods          get/list/watch — core of autodiscover: Filebeat must list all
+#                 pods on its node and watch for changes to start/stop tailing.
+#
+#   nodes         get/list/watch — add_host_metadata and add_kubernetes_metadata
+#                 enrich events with node labels and allocatable resources.
+#
+#   replicasets   get/list/watch — resolves the owning ReplicaSet → Deployment
+#                 chain so events carry kubernetes.deployment.name.  Without this,
+#                 only the pod name is known, not the deployment.
+#
+#   deployments   get/list/watch — direct lookup fallback when ReplicaSet does
+#                 not have an owner reference (e.g. standalone deployments).
+#
+#   statefulsets  get/list/watch — enriches StatefulSet pod events (e.g. ES,
+#                 Logstash, user-db) with the StatefulSet name.
+#
+#   daemonsets    get/list/watch — enriches DaemonSet pod events (e.g. Filebeat
+#                 itself, Falco, node-exporter) with the DaemonSet name.
+#
+#   events        get/list/watch — optional but useful: Filebeat can ship
+#                 Kubernetes events (pod OOM kills, image pull failures) to
+#                 Elasticsearch for correlation with security alerts.
+#
+# No write permissions are granted anywhere.  Filebeat is read-only against the
+# Kubernetes API.
+# ──────────────────────────────────────────────────────────────────────────────
+
+# ── ServiceAccount ────────────────────────────────────────────────────────────
+# Note: this duplicates the SA defined in infra/rbac/service-accounts.yaml.
+# It is included here so that `kubectl apply -f siem/filebeat/` works as a
+# self-contained unit without requiring the rbac/ directory to be applied first.
+# If both are applied, kubectl will reconcile to the same object.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: filebeat
+  namespace: siem
+  labels:
+    app: filebeat
+    securecloud.io/component: filebeat-log-shipper
+    securecloud.io/tier: siem
+  annotations:
+    securecloud.io/rationale: >
+      Filebeat DaemonSet identity. Bound to filebeat-metadata-reader ClusterRole
+      for Kubernetes API access needed by autodiscover and metadata enrichment.
+# Override the SA-level default — the DaemonSet spec sets
+# automountServiceAccountToken: true explicitly so only this DaemonSet's pods
+# get the token mounted, not any other pod that might use this SA in future.
+automountServiceAccountToken: false
+
+---
+# ── ClusterRole ───────────────────────────────────────────────────────────────
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: filebeat
+  labels:
+    app: filebeat
+    securecloud.io/component: filebeat-log-shipper
+rules:
+  # Core API group — pods, nodes, namespaces, events
+  - apiGroups: [""]
+    resources:
+      - namespaces
+      - pods
+      - nodes
+      - nodes/stats    # node resource stats for add_host_metadata
+      - events         # Kubernetes events for correlation
+    verbs: ["get", "list", "watch"]
+
+  # Apps API group — workload owner references for metadata enrichment
+  - apiGroups: ["apps"]
+    resources:
+      - replicasets
+      - deployments
+      - statefulsets
+      - daemonsets
+    verbs: ["get", "list", "watch"]
+
+  # Non-resource URL: /metrics on the API server (for cluster health events)
+  - nonResourceURLs:
+      - "/metrics"
+    verbs: ["get"]
+
+---
+# ── ClusterRoleBinding ────────────────────────────────────────────────────────
+# Binds the ClusterRole cluster-wide so Filebeat can watch pods across all
+# namespaces from any node it is scheduled on.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: filebeat
+  labels:
+    app: filebeat
+    securecloud.io/component: filebeat-log-shipper
+subjects:
+  - kind: ServiceAccount
+    name: filebeat
+    namespace: siem
+roleRef:
+  kind: ClusterRole
+  name: filebeat
+  apiGroup: rbac.authorization.k8s.io

@@ -1,0 +1,296 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# filebeat-config.yaml
+#
+# ConfigMap containing filebeat.yml for the SecureCloud-BD DaemonSet.
+#
+# Key design decisions:
+#
+#   Autodiscovery vs static inputs:
+#     Static `filebeat.inputs` with glob paths works but cannot attach
+#     Kubernetes metadata (pod name, namespace, labels) correctly — the
+#     `add_kubernetes_metadata` processor has to do a reverse-DNS lookup from
+#     the container log filename to find the pod, which is fragile.
+#
+#     `filebeat.autodiscover` with the kubernetes provider subscribes to the
+#     Kubernetes API watch stream.  When a pod starts, Filebeat gets notified
+#     and begins tailing its log with full metadata already known.  This is the
+#     recommended approach for Kubernetes since Filebeat 7.x.
+#
+#   Separate input hints for app logs vs Falco:
+#     App container logs are picked up via autodiscover.
+#     Falco writes JSON to /var/log/falco/falco.json on the host; this is a
+#     separate static input because Falco is not a Kubernetes container managed
+#     by the kubelet — it runs as a DaemonSet but writes to a host path.
+#
+#   decode_json_fields processor:
+#     Many containers (payment-api FastAPI, threat-api) emit structured JSON on
+#     stdout.  This processor parses the `message` field in place so Logstash
+#     receives pre-decoded fields rather than a raw JSON string.  Fields that
+#     are not valid JSON pass through unchanged (overwrite_keys: false means
+#     existing top-level fields like @timestamp are never clobbered).
+#
+#   Self-exclusion:
+#     Filebeat itself runs in the siem namespace.  Without exclusion its own
+#     INFO/DEBUG log lines would be shipped to Elasticsearch, inflating the
+#     index with noise.  The condition `kubernetes.namespace != siem` OR a
+#     container name exclude list stops this.
+# ──────────────────────────────────────────────────────────────────────────────
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: filebeat-config
+  namespace: siem
+  labels:
+    app: filebeat
+    securecloud.io/component: filebeat-log-shipper
+    securecloud.io/tier: siem
+data:
+  filebeat.yml: |
+    # ── Autodiscovery: Kubernetes provider ──────────────────────────────────
+    # Filebeat watches the Kubernetes API for pod start/stop events and
+    # automatically begins/stops tailing the container log for each pod.
+    # The `host` field is resolved from the NODE_NAME env var injected
+    # via the Downward API in the DaemonSet (see filebeat-daemonset.yaml).
+    filebeat.autodiscover:
+      providers:
+        - type: kubernetes
+          node: ${NODE_NAME}
+          # scope: node — only watch pods on this node (each DaemonSet pod
+          # manages its own node; avoids O(n²) API watch overhead).
+          scope: node
+          # kube_config: empty → use the pod's ServiceAccount token
+          # (automountServiceAccountToken is set to true in the DaemonSet
+          # spec override, even though the SA default is false).
+
+          # ── Hints-based config ───────────────────────────────────────────
+          # Pods can opt in to custom parsing by adding annotations:
+          #   co.elastic.logs/enabled: "true"
+          #   co.elastic.logs/json.keys_under_root: "true"
+          #   co.elastic.logs/fields.log_type: "myapp"
+          hints:
+            enabled: true
+            default_config:
+              type: container
+              paths:
+                - /var/log/containers/*-${data.kubernetes.container.id}.log
+              # Exclude Filebeat's own container logs and kube-system noise
+              exclude_lines:
+                - '^\s*$'   # blank lines
+              # Multiline: catch Python tracebacks and Java stack traces
+              multiline:
+                type: pattern
+                pattern: '^\s+(at|\.{3})\b|^Caused by:'
+                negate: false
+                match: after
+                max_lines: 50
+                timeout: 5s
+
+          # ── Templates: per-namespace config ──────────────────────────────
+          # Templates are matched in order; the first match wins.
+          # Conditions use the kubernetes metadata that the provider already knows.
+          templates:
+
+            # ── Exclude Filebeat itself ─────────────────────────────────────
+            - condition:
+                and:
+                  - equals:
+                      kubernetes.namespace: siem
+                  - equals:
+                      kubernetes.container.name: filebeat
+              config:
+                - type: container
+                  paths:
+                    - /var/log/containers/*-${data.kubernetes.container.id}.log
+                  enabled: false    # explicitly disable — drop all Filebeat self-logs
+
+            # ── Exclude gatekeeper-system noise ────────────────────────────
+            - condition:
+                equals:
+                  kubernetes.namespace: gatekeeper-system
+              config:
+                - type: container
+                  paths:
+                    - /var/log/containers/*-${data.kubernetes.container.id}.log
+                  enabled: false
+
+            # ── Falco alerts (siem namespace) ───────────────────────────────
+            - condition:
+                and:
+                  - equals:
+                      kubernetes.namespace: siem
+                  - equals:
+                      kubernetes.container.name: falco
+              config:
+                - type: container
+                  paths:
+                    - /var/log/containers/*-${data.kubernetes.container.id}.log
+                  fields:
+                    log_type: falco
+                  fields_under_root: true
+                  # Falco already emits JSON; parse it here so Logstash
+                  # receives pre-decoded fields.
+                  parsers:
+                    - ndjson:
+                        keys_under_root: true
+                        add_error_key: true
+                        overwrite_keys: false
+
+            # ── bKash app namespace ────────────────────────────────────────
+            - condition:
+                equals:
+                  kubernetes.namespace: apps
+              config:
+                - type: container
+                  paths:
+                    - /var/log/containers/*-${data.kubernetes.container.id}.log
+                  fields:
+                    log_type: app
+                    environment: dev
+                  fields_under_root: true
+                  # payment-api and threat-api emit structured JSON; parse it.
+                  # Non-JSON lines (Flask plain-text) pass through unchanged.
+                  parsers:
+                    - ndjson:
+                        keys_under_root: false   # nest under 'json' key first
+                        add_error_key: true
+                        overwrite_keys: false
+                        message_key: message
+
+            # ── ML namespace ───────────────────────────────────────────────
+            - condition:
+                or:
+                  - equals:
+                      kubernetes.namespace: ml-engine
+                  - equals:
+                      kubernetes.namespace: ml
+              config:
+                - type: container
+                  paths:
+                    - /var/log/containers/*-${data.kubernetes.container.id}.log
+                  fields:
+                    log_type: ml
+                  fields_under_root: true
+
+            # ── Catch-all for all other namespaces ─────────────────────────
+            - config:
+                - type: container
+                  paths:
+                    - /var/log/containers/*-${data.kubernetes.container.id}.log
+                  fields:
+                    log_type: kubernetes
+                  fields_under_root: true
+
+    # ── Static input: Falco host log file ────────────────────────────────────
+    # When Falco is configured with json_output: true and output_filename
+    # pointing at /var/log/falco/falco.json, it writes newline-delimited
+    # JSON to that path.  This complements the container log input above
+    # for clusters where Falco's container log goes to stdout AND a file.
+    filebeat.inputs:
+      - type: filestream
+        id: falco-host-log
+        paths:
+          - /var/log/falco/falco.json
+        fields:
+          log_type: falco
+        fields_under_root: true
+        parsers:
+          - ndjson:
+              keys_under_root: true
+              add_error_key: true
+              overwrite_keys: false
+        # Exclude the "initial scan" back-fill of old Falco events at startup
+        # (comment out if you want historical alerts after a Filebeat restart)
+        ignore_older: 24h
+
+    # ── Processors ────────────────────────────────────────────────────────────
+    # Processors run on every event regardless of which input produced it.
+    processors:
+      # Attach Kubernetes metadata: pod name, namespace, labels, annotations,
+      # node name, deployment name.  This processor uses the already-known
+      # kubernetes.* fields from autodiscover — it is NOT doing a separate
+      # API lookup here; it just promotes them into the ECS orchestrator fields.
+      - add_kubernetes_metadata:
+          host: ${NODE_NAME}
+          matchers:
+            - logs_path:
+                logs_path: "/var/log/containers/"
+
+      # Decode the `message` field as JSON if it looks like a JSON object.
+      # target: ""  → merge fields into the root document (ECS style)
+      # overwrite_keys: false → never clobber @timestamp or existing ECS fields
+      # when.regexp guard prevents double-decoding events already parsed by
+      # the ndjson parser in the autodiscover template above.
+      - decode_json_fields:
+          fields: ["message"]
+          target: ""
+          overwrite_keys: false
+          add_error_key: true
+          max_depth: 3
+          when:
+            regexp:
+              message: '^\s*\{'
+
+      # Drop internal Filebeat metrics/monitoring events from the pipeline
+      - drop_event:
+          when:
+            or:
+              - equals:
+                  type: "stats"
+              - equals:
+                  metricset.name: "stats"
+
+      # Add cloud provider metadata if running on a cloud node (no-op on Minikube)
+      - add_cloud_metadata:
+          timeout: 3s
+
+      # Add host-level metadata: hostname, OS, architecture
+      - add_host_metadata:
+          netinfo.enabled: false  # skip network interface enumeration (slow)
+
+    # ── Output: Logstash ──────────────────────────────────────────────────────
+    output.logstash:
+      # The Logstash service is named after the Helm release in install-elk.sh.
+      # If you changed the release name, update this hostname.
+      hosts:
+        - "securecloud-ls:5044"
+      # Fallback to the legacy service name from the raw manifests
+      # (used when siem/logstash/deployment.yaml is deployed instead of Helm)
+      # hosts: ["logstash.siem.svc.cluster.local:5044"]
+
+      # Connection pool: two load-balanced Logstash endpoints.
+      # loadbalance: true round-robins across all listed hosts.
+      loadbalance: false   # only one Logstash replica in dev; set true if scaled
+
+      # Bulk send: 50 events per batch — appropriate for a low-traffic dev cluster
+      bulk_max_size: 50
+
+      # Retry settings
+      max_retries: 3
+      backoff.init: 1s
+      backoff.max: 60s
+
+      # Worker goroutines sending to Logstash
+      worker: 1
+
+      # TTL on idle connections
+      timeout: 30s
+
+      # SSL disabled — Istio mTLS handles transport encryption
+      ssl.enabled: false
+
+    # ── Logging ───────────────────────────────────────────────────────────────
+    logging.level: info
+    logging.to_files: false    # log to stderr → picked up by the kubelet
+    logging.json: true         # structured JSON for Logstash to parse
+
+    # ── Internal metrics ──────────────────────────────────────────────────────
+    # Expose Filebeat internal metrics on port 5066 for Prometheus scraping
+    # (optional; requires a ServiceMonitor CRD if using the Prometheus operator)
+    http:
+      enabled: true
+      host: 0.0.0.0
+      port: 5066
+
+    # ── Monitoring ────────────────────────────────────────────────────────────
+    # Disable X-Pack monitoring (avoids writing to .monitoring-* ES indices)
+    monitoring.enabled: false

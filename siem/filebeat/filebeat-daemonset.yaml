@@ -1,0 +1,275 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# filebeat-daemonset.yaml
+#
+# Runs one Filebeat pod on every cluster node to collect container logs and
+# ship them to Logstash.
+#
+# Volume mounts:
+#
+#   /var/log/containers  (read-only)
+#     Symlinks maintained by the kubelet: <pod>_<ns>_<container>-<id>.log
+#     → ../pods/<uid>/containers/<name>/<id>.log
+#     Filebeat's autodiscover resolves these symlinks to identify pods.
+#     This is the primary discovery path for container log metadata.
+#
+#   /var/lib/docker/containers  (read-only)
+#     Actual container log files written by the Docker/containerd runtime.
+#     The symlinks in /var/log/containers point here.
+#     Both paths are needed: /var/log/containers for discovery,
+#     /var/lib/docker/containers for the actual bytes.
+#
+#   /var/log/pods  (read-only)
+#     containerd writes logs to /var/log/pods/<uid>/<container>/<n>.log
+#     instead of /var/lib/docker/containers when not using Docker as runtime.
+#     Mounting both /var/lib/docker/containers and /var/log/pods makes
+#     Filebeat runtime-agnostic (works on Docker, containerd, CRI-O).
+#
+#   /var/log/falco  (read-only)
+#     Falco writes newline-delimited JSON to this host path.  The static
+#     input in filebeat-config.yaml tails this file.
+#
+#   /etc/machine-id  (read-only)
+#     add_host_metadata uses this to derive the unique host ID without
+#     requiring privileged access to /proc/sys/kernel/random/uuid.
+#
+# Security context:
+#   runAsUser: 0 (root) is required because:
+#   - Container log files on the host are owned by root with mode 0640.
+#   - Filebeat must read them from the host mount.
+#   Mitigations:
+#   - readOnlyRootFilesystem: true — Filebeat binary and config are read-only.
+#   - ALL capabilities are dropped.
+#   - The hostPath mounts are all readOnly: true.
+#   - No hostNetwork, hostPID, hostIPC.
+#
+#   NOTE: The OPA no-privileged-containers constraint checks
+#   securityContext.privileged (not runAsUser=0).  runAsUser=0 is NOT the
+#   same as privileged — this pod does NOT have privileged: true and does not
+#   need an OPA exemption for that constraint.  The require-resource-limits
+#   and no-host-namespace constraints are also satisfied.
+# ──────────────────────────────────────────────────────────────────────────────
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: filebeat
+  namespace: siem
+  labels:
+    app: filebeat
+    securecloud.io/component: filebeat-log-shipper
+    securecloud.io/tier: siem
+spec:
+  selector:
+    matchLabels:
+      app: filebeat
+  # RollingUpdate ensures at most one node goes without log shipping during
+  # a Filebeat upgrade.
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+
+  template:
+    metadata:
+      labels:
+        app: filebeat
+        securecloud.io/component: filebeat-log-shipper
+      annotations:
+        # Restart the DaemonSet when the config ConfigMap changes.
+        # kubectl rollout restart daemonset/filebeat -n siem  OR
+        # use a checksum annotation with Helm; here we document the pattern.
+        securecloud.io/config-checksum: "update-this-when-filebeat-config.yaml-changes"
+
+    spec:
+      serviceAccountName: filebeat
+      # Override the SA default (false) — this pod needs the token for autodiscover
+      automountServiceAccountToken: true
+
+      # Allow up to 30 s for Filebeat to flush its pipeline before SIGKILL.
+      # Filebeat's built-in shutdown hook flushes the spooler on SIGTERM.
+      terminationGracePeriodSeconds: 30
+
+      # Tolerate all node taints so Filebeat runs on control-plane nodes too
+      # (relevant if Minikube's single node has a control-plane taint).
+      tolerations:
+        - key: node-role.kubernetes.io/control-plane
+          operator: Exists
+          effect: NoSchedule
+        - key: node-role.kubernetes.io/master
+          operator: Exists
+          effect: NoSchedule
+
+      # ── Init container: wait for Logstash ──────────────────────────────────
+      # Filebeat will crash-loop if Logstash is not yet ready.  This init
+      # container polls the Logstash monitoring API before starting the main
+      # container.  It is skipped if Logstash hasn't been installed yet
+      # (nc returns an error and the init container exits non-zero; comment
+      # it out during initial cluster setup if needed).
+      initContainers:
+        - name: wait-for-logstash
+          image: docker.io/library/busybox:1.36
+          command:
+            - sh
+            - -c
+            - |
+              echo "Waiting for Logstash at securecloud-ls:5044..."
+              until nc -z securecloud-ls 5044 2>/dev/null; do
+                echo "  Logstash not ready, retrying in 5s..."
+                sleep 5
+              done
+              echo "Logstash is ready."
+          resources:
+            requests:
+              cpu: "10m"
+              memory: "16Mi"
+            limits:
+              cpu: "50m"
+              memory: "32Mi"
+
+      containers:
+        - name: filebeat
+          image: docker.elastic.co/beats/filebeat:8.12.2
+          imagePullPolicy: IfNotPresent
+          args:
+            - "-c"
+            - "/etc/filebeat/filebeat.yml"
+            - "-e"          # log to stderr
+            - "--strict.perms=false"   # don't require 0600 on config (ConfigMap is 0644)
+
+          env:
+            # NODE_NAME is used by autodiscover `scope: node` and add_host_metadata
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+
+            # POD_NAMESPACE for self-exclusion logging context
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+
+          securityContext:
+            runAsUser: 0              # required to read host log files (see header)
+            runAsGroup: 0
+            privileged: false         # NOT privileged — just runs as UID 0
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+
+          volumeMounts:
+            # Filebeat configuration (from filebeat-config.yaml ConfigMap)
+            - name: config
+              mountPath: /etc/filebeat/filebeat.yml
+              subPath: filebeat.yml
+              readOnly: true
+
+            # Container log symlinks (kubelet-managed)
+            - name: varlogcontainers
+              mountPath: /var/log/containers
+              readOnly: true
+
+            # Actual log bytes (Docker runtime)
+            - name: varlibdockercontainers
+              mountPath: /var/lib/docker/containers
+              readOnly: true
+
+            # Actual log bytes (containerd / CRI-O runtime path)
+            - name: varlogpods
+              mountPath: /var/log/pods
+              readOnly: true
+
+            # Falco host log file
+            - name: falcologs
+              mountPath: /var/log/falco
+              readOnly: true
+
+            # Host machine-id for add_host_metadata
+            - name: machineid
+              mountPath: /etc/machine-id
+              readOnly: true
+
+            # Filebeat registry — tracks which files have been read.
+            # Must be writable and must survive pod restarts to avoid
+            # re-reading (and re-indexing) log files from the beginning.
+            - name: registry
+              mountPath: /usr/share/filebeat/data
+
+            # /tmp for Filebeat's internal temp files (readOnlyRootFilesystem
+            # requires an explicit writable volume for /tmp)
+            - name: tmp
+              mountPath: /tmp
+
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "150Mi"
+            limits:
+              cpu: "300m"
+              memory: "256Mi"
+
+          # Liveness: Filebeat exposes a monitoring API on port 5066
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 5066
+            initialDelaySeconds: 60
+            periodSeconds: 30
+            failureThreshold: 3
+            timeoutSeconds: 5
+
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 5066
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            failureThreshold: 3
+            timeoutSeconds: 5
+
+      volumes:
+        # ── Config ────────────────────────────────────────────────────────────
+        - name: config
+          configMap:
+            name: filebeat-config
+            defaultMode: 0444   # world-readable, not world-writable
+
+        # ── Host log paths ────────────────────────────────────────────────────
+        - name: varlogcontainers
+          hostPath:
+            path: /var/log/containers
+            type: DirectoryOrCreate
+
+        - name: varlibdockercontainers
+          hostPath:
+            path: /var/lib/docker/containers
+            type: DirectoryOrCreate
+
+        - name: varlogpods
+          hostPath:
+            path: /var/log/pods
+            type: DirectoryOrCreate
+
+        - name: falcologs
+          hostPath:
+            path: /var/log/falco
+            type: DirectoryOrCreate
+
+        - name: machineid
+          hostPath:
+            path: /etc/machine-id
+            type: FileOrCreate
+
+        # ── Writable volumes ──────────────────────────────────────────────────
+        # Registry: must persist across pod restarts to track log offsets.
+        # hostPath is used so the registry survives DaemonSet rolling updates
+        # (emptyDir would be wiped on pod restart, causing re-indexing).
+        - name: registry
+          hostPath:
+            path: /var/lib/filebeat/registry
+            type: DirectoryOrCreate
+
+        # Temp dir for readOnlyRootFilesystem compliance
+        - name: tmp
+          emptyDir: {}
