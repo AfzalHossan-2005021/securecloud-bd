@@ -1,0 +1,122 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# kibana-values.yaml
+#
+# Helm values for the official Elastic kibana chart.
+# Chart: elastic/kibana  (https://helm.elastic.co)
+# Target version: 8.12.2  (must match elasticsearch-values.yaml imageTag)
+#
+# Memory budget:
+#   Kibana Node.js process: 512 MB heap (--max-old-space-size=512)
+#   Container limit:        768 MiB
+#   Leaves headroom for V8 non-heap, native modules, OS buffers.
+#
+# Access:
+#   NodePort 30601 on the Minikube node IP.
+#   Get the URL with:  minikube service kibana-kb-http -n siem --url
+#   Or directly:       http://$(minikube ip):30601
+#
+# Auth:
+#   xpack.security.enabled is false on the Elasticsearch side, so Kibana also
+#   runs without authentication.  The login screen is bypassed entirely.
+#   Set kibanaConfig.server.basePath if running behind a reverse proxy.
+# ──────────────────────────────────────────────────────────────────────────────
+
+# ── Image ─────────────────────────────────────────────────────────────────────
+image: "docker.elastic.co/kibana/kibana"
+imageTag: "8.12.2"
+imagePullPolicy: IfNotPresent
+
+# ── Replicas ──────────────────────────────────────────────────────────────────
+replicas: 1
+
+# ── Kibana configuration ──────────────────────────────────────────────────────
+kibanaConfig:
+  kibana.yml: |
+    # Elasticsearch connection
+    elasticsearch.hosts: ["http://securecloud-es-master:9200"]
+    # No credentials required because xpack.security is disabled in ES
+    # elasticsearch.username: ""
+    # elasticsearch.password: ""
+
+    # Server
+    server.host: "0.0.0.0"
+    server.name: "securecloud-kibana"
+    server.publicBaseUrl: ""
+
+    # Disable security prompts in the UI — dev-only setting
+    xpack.security.enabled: false
+
+    # Disable telemetry (keeps network traffic off the research cluster)
+    telemetry.enabled: false
+    telemetry.optIn: false
+
+    # Logging
+    logging.root.level: info
+    logging.appenders.default.type: console
+    logging.appenders.default.layout.type: json
+
+    # Maps — disable if Elastic Maps Service is unavailable (offline cluster)
+    map.includeElasticMapsService: false
+
+    # Disable news feed in home screen (avoids external calls)
+    newsfeed.enabled: false
+
+    # Saved object import limits
+    savedObjects.maxImportPayloadBytes: 26214400
+
+# ── Elasticsearch reference ───────────────────────────────────────────────────
+elasticsearchHosts: "http://securecloud-es-master:9200"
+
+# ── Resources ─────────────────────────────────────────────────────────────────
+resources:
+  requests:
+    cpu: "100m"
+    memory: "512Mi"
+  limits:
+    cpu: "500m"
+    memory: "768Mi"
+
+# ── JVM / Node.js heap ────────────────────────────────────────────────────────
+# Kibana uses Node.js; the NODE_OPTIONS env var caps V8 heap to avoid OOM.
+extraEnvs:
+  - name: NODE_OPTIONS
+    value: "--max-old-space-size=512"
+
+# ── Service ───────────────────────────────────────────────────────────────────
+service:
+  type: NodePort
+  port: 5601
+  nodePort: 30601
+  loadBalancerIP: ""
+  annotations: {}
+  labels:
+    securecloud.io/component: kibana
+
+# ── Health checks ─────────────────────────────────────────────────────────────
+# Kibana waits for Elasticsearch before reporting ready; increase initial delay.
+readinessProbe:
+  failureThreshold: 3
+  initialDelaySeconds: 90   # ES + Kibana both cold-starting; give them time
+  periodSeconds: 10
+  successThreshold: 3
+  timeoutSeconds: 5
+
+# ── Security context ──────────────────────────────────────────────────────────
+podSecurityContext:
+  fsGroup: 1000
+
+securityContext:
+  capabilities:
+    drop:
+      - ALL
+  runAsNonRoot: true
+  runAsUser: 1000
+
+# ── Persistence ───────────────────────────────────────────────────────────────
+# Kibana itself is stateless (saved objects live in .kibana-* ES indices).
+# No persistent volume needed for the Kibana pod itself.
+
+# ── Labels ───────────────────────────────────────────────────────────────────
+labels:
+  securecloud.io/component: kibana
+  securecloud.io/tier: siem

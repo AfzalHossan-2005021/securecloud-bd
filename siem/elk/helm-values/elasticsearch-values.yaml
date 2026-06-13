@@ -1,0 +1,154 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# elasticsearch-values.yaml
+#
+# Helm values for the official Elastic elasticsearch chart.
+# Chart: elastic/elasticsearch  (https://helm.elastic.co)
+# Target version: 8.12.2 (pin in install-elk.sh; must match kibana + logstash)
+#
+# Memory budget on the 8 GB workstation:
+#   ES heap:           2 GB  (Xms2g / Xmx2g)
+#   ES container:      4 GB  limit (heap + off-heap, field data cache, OS page cache)
+#   Remaining for KB+LS+sidecar: ~4 GB
+#
+# Single-node dev mode:
+#   discovery.type=single-node disables the multi-node quorum election that
+#   requires at least 3 master-eligible nodes.  Never use this in production.
+#
+# xpack.security.enabled=false:
+#   Disables TLS between nodes and HTTP authentication for the REST API.
+#   Acceptable for an isolated Minikube cluster where Istio mTLS already
+#   encrypts pod-to-pod traffic.  For a real deployment, re-enable and
+#   configure proper certificates via the ECK operator instead.
+#
+# vm.max_map_count:
+#   Elasticsearch requires ≥262144.  The sysctlVmMaxMapCount setting adds an
+#   initContainer that runs `sysctl -w vm.max_map_count=262144` on the node.
+#   This requires a privileged initContainer — the OPA constraint for
+#   no-privileged-containers must exempt the siem namespace or the
+#   siem/elasticsearch pod specifically.
+# ──────────────────────────────────────────────────────────────────────────────
+
+# ── Image ─────────────────────────────────────────────────────────────────────
+image: "docker.elastic.co/elasticsearch/elasticsearch"
+imageTag: "8.12.2"
+imagePullPolicy: IfNotPresent
+
+# ── Cluster identity ──────────────────────────────────────────────────────────
+clusterName: "securecloud-es"
+nodeGroup: "master"    # single node acts as master + data + ingest
+
+# ── Single-node mode ──────────────────────────────────────────────────────────
+replicas: 1
+minimumMasterNodes: 1  # quorum = 1 for single-node
+
+# Discovery config injected via esConfig below; this disables voting bootstrapping
+esConfig:
+  elasticsearch.yml: |
+    cluster.name: securecloud-es
+    node.name: securecloud-es-master-0
+    discovery.type: single-node
+    network.host: 0.0.0.0
+    #
+    # Security — disabled for isolated dev cluster (Istio mTLS is the transport layer)
+    xpack.security.enabled: false
+    xpack.security.transport.ssl.enabled: false
+    xpack.security.http.ssl.enabled: false
+    #
+    # Performance — single-node research cluster, latency over throughput
+    indices.memory.index_buffer_size: 10%
+    # Reduce number of shards; default 1 primary 1 replica makes no sense on 1 node
+    index.number_of_replicas: 0
+    #
+    # ILM — rotate indices when they exceed 5 GB or 30 days (keeps disk usage bounded)
+    # ILM policies are created separately via Kibana or Elasticsearch API after boot.
+
+# ── JVM heap ──────────────────────────────────────────────────────────────────
+# Rule of thumb: heap ≤ 50% of container RAM, max 31 GB (compressed OOPs limit).
+# With a 4 Gi container limit → 2 Gi heap.
+esJavaOpts: "-Xmx2g -Xms2g"
+
+# ── Resource limits ───────────────────────────────────────────────────────────
+resources:
+  requests:
+    cpu: "500m"
+    memory: "3Gi"
+  limits:
+    cpu: "2000m"   # 2 vCPU
+    memory: "4Gi"
+
+# ── Persistence ───────────────────────────────────────────────────────────────
+persistence:
+  enabled: true
+  labels:
+    enabled: false
+  annotations: {}
+
+volumeClaimTemplate:
+  accessModes: ["ReadWriteOnce"]
+  storageClassName: "standard"  # Minikube default provisioner
+  resources:
+    requests:
+      storage: 20Gi
+
+# ── vm.max_map_count initContainer ───────────────────────────────────────────
+# Required for Elasticsearch on Linux.  This privileged initContainer is the
+# standard Elastic Helm chart approach; OPA Gatekeeper must exempt the siem
+# namespace for privileged initContainers (add siem to the NoPrivilegedContainers
+# constraint's excludedNamespaces or change enforcementAction to warn for siem).
+sysctlVmMaxMapCount: 262144
+
+# ── Network ───────────────────────────────────────────────────────────────────
+service:
+  type: ClusterIP
+  httpPortName: http
+  transportPortName: transport
+  ports:
+    - name: http
+      port: 9200
+      protocol: TCP
+    - name: transport
+      port: 9300
+      protocol: TCP
+
+# ── Probes ────────────────────────────────────────────────────────────────────
+readinessProbe:
+  failureThreshold: 3
+  initialDelaySeconds: 60   # ES takes ~45 s to start on a cold node
+  periodSeconds: 10
+  successThreshold: 3
+  timeoutSeconds: 5
+
+# ── Security context ──────────────────────────────────────────────────────────
+podSecurityContext:
+  fsGroup: 1000
+  runAsUser: 1000
+
+securityContext:
+  capabilities:
+    drop:
+      - ALL
+  runAsNonRoot: true
+  runAsUser: 1000
+
+# ── Anti-affinity ─────────────────────────────────────────────────────────────
+# Disabled — only one node in Minikube, anti-affinity would prevent scheduling.
+antiAffinityTopologyKey: "none"
+antiAffinity: "soft"
+
+# ── Monitoring ────────────────────────────────────────────────────────────────
+# Disable X-Pack monitoring (it tries to write to .monitoring-* indices and adds
+# overhead on a constrained single-node cluster).
+xpackMonitoringEnabled: false
+
+# ── Protocol ──────────────────────────────────────────────────────────────────
+protocol: http
+
+# ── Tolerations / node selector ──────────────────────────────────────────────
+# Not needed for Minikube; included as empty stubs for documentation.
+tolerations: []
+nodeSelector: {}
+
+# ── Labels applied to all resources ──────────────────────────────────────────
+labels:
+  securecloud.io/component: elasticsearch
+  securecloud.io/tier: siem

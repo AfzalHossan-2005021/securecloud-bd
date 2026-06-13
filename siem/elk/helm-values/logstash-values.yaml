@@ -1,0 +1,165 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# logstash-values.yaml
+#
+# Helm values for the official Elastic logstash chart.
+# Chart: elastic/logstash  (https://helm.elastic.co)
+# Target version: 8.12.2  (must match elasticsearch imageTag)
+#
+# Memory budget:
+#   JVM heap:         1 GB  (Xmx1g / Xms1g)
+#   Container limit:  1.5 Gi (heap + off-heap: pipeline worker queues, native libs)
+#
+# Pipeline configuration:
+#   The pipeline conf is maintained separately in logstash-pipeline.conf and
+#   mounted into the container via a ConfigMap.  The chart's `logstashPipeline`
+#   value is used to inject the ConfigMap data at deploy time (see install-elk.sh
+#   which creates the ConfigMap from logstash-pipeline.conf before helm install).
+#
+#   The chart mounts the pipeline ConfigMap at /usr/share/logstash/pipeline/.
+#   Any *.conf files in that directory are loaded automatically by Logstash.
+# ──────────────────────────────────────────────────────────────────────────────
+
+# ── Image ─────────────────────────────────────────────────────────────────────
+image: "docker.elastic.co/logstash/logstash"
+imageTag: "8.12.2"
+imagePullPolicy: IfNotPresent
+
+# ── Replicas ──────────────────────────────────────────────────────────────────
+replicas: 1
+
+# ── JVM heap ──────────────────────────────────────────────────────────────────
+logstashJavaOpts: "-Xmx1g -Xms1g"
+
+# ── Logstash system config ────────────────────────────────────────────────────
+logstashConfig:
+  logstash.yml: |
+    http.host: 0.0.0.0
+    http.port: 9600
+
+    # Pipeline workers = number of CPU cores available / 2 (single-node budget)
+    pipeline.workers: 2
+    pipeline.batch.size: 125
+    pipeline.batch.delay: 50
+
+    # Persistent queue on disk (survives Logstash restarts without losing events)
+    queue.type: persisted
+    queue.max_bytes: 1gb
+    path.queue: /usr/share/logstash/data/queue
+
+    # Dead letter queue — events that fail all retry attempts land here
+    dead_letter_queue.enable: true
+    path.dead_letter_queue: /usr/share/logstash/data/dlq
+
+    # Disable X-Pack monitoring (avoids writing to .monitoring-* in ES)
+    xpack.monitoring.enabled: false
+
+    # Log format — JSON for structured ingestion by Filebeat
+    log.format: json
+    log.level: info
+
+  pipelines.yml: |
+    - pipeline.id: securecloud
+      path.config: "/usr/share/logstash/pipeline/logstash-pipeline.conf"
+      pipeline.workers: 2
+
+# ── Pipeline configuration ────────────────────────────────────────────────────
+# The install-elk.sh script creates a ConfigMap named 'logstash-pipeline'
+# in the siem namespace from siem/elk/logstash-pipeline.conf.
+# This extraVolume + extraVolumeMount pair mounts it into the pipeline directory.
+#
+# The chart's built-in `logstashPipeline` dict can also inline the conf here,
+# but keeping it in logstash-pipeline.conf makes it easier to edit and version.
+extraVolumes: |
+  - name: pipeline-config
+    configMap:
+      name: logstash-pipeline
+
+extraVolumeMounts: |
+  - name: pipeline-config
+    mountPath: /usr/share/logstash/pipeline/logstash-pipeline.conf
+    subPath: logstash-pipeline.conf
+    readOnly: true
+
+# ── Elasticsearch output credentials ─────────────────────────────────────────
+# The pipeline conf references ${ELASTIC_PASSWORD} — inject it from the same
+# Secret that Elasticsearch uses so the password stays in one place.
+extraEnvs:
+  - name: ELASTIC_PASSWORD
+    valueFrom:
+      secretKeyRef:
+        name: elastic-credentials
+        key: password
+        optional: true   # optional=true allows startup when security is disabled
+
+# ── Resources ─────────────────────────────────────────────────────────────────
+resources:
+  requests:
+    cpu: "200m"
+    memory: "1Gi"
+  limits:
+    cpu: "1000m"
+    memory: "1536Mi"   # 1.5 Gi: 1 Gi heap + 512 Mi off-heap margin
+
+# ── Persistence (queue + DLQ) ─────────────────────────────────────────────────
+persistence:
+  enabled: true
+  annotations: {}
+
+volumeClaimTemplate:
+  accessModes: ["ReadWriteOnce"]
+  storageClassName: "standard"
+  resources:
+    requests:
+      storage: 5Gi
+
+# ── Services ──────────────────────────────────────────────────────────────────
+service:
+  annotations: {}
+  type: ClusterIP
+  ports:
+    - name: beats
+      port: 5044
+      protocol: TCP
+      targetPort: 5044
+    - name: http
+      port: 9600
+      protocol: TCP
+      targetPort: 9600
+
+# ── Probes ────────────────────────────────────────────────────────────────────
+# Logstash exposes a monitoring API on port 9600; use it for readiness.
+readinessProbe:
+  httpGet:
+    path: /
+    port: 9600
+  failureThreshold: 3
+  initialDelaySeconds: 60
+  periodSeconds: 10
+  successThreshold: 3
+  timeoutSeconds: 5
+
+livenessProbe:
+  httpGet:
+    path: /
+    port: 9600
+  failureThreshold: 3
+  initialDelaySeconds: 120
+  periodSeconds: 10
+  timeoutSeconds: 5
+
+# ── Security context ──────────────────────────────────────────────────────────
+podSecurityContext:
+  fsGroup: 1000
+  runAsUser: 1000
+
+securityContext:
+  capabilities:
+    drop:
+      - ALL
+  runAsNonRoot: true
+  runAsUser: 1000
+
+# ── Labels ────────────────────────────────────────────────────────────────────
+labels:
+  securecloud.io/component: logstash
+  securecloud.io/tier: siem
