@@ -1,0 +1,30 @@
+{% extends "base.html" %}
+{% block title %}Check Balance{% endblock %}
+{% block content %}
+<div class="card">
+  <h2>Check Balance</h2>
+  <form method="POST">
+    <label for="user_id">Phone number / User ID</label>
+    <input type="text" id="user_id" name="user_id" placeholder="e.g. 01711000001" required>
+    <button type="submit">Check Balance</button>
+  </form>
+</div>
+
+{% if error %}
+  <div class="alert alert-danger">{{ error }}</div>
+{% endif %}
+
+{% if result %}
+<div class="card">
+  <h2>Account Summary</h2>
+  <div class="kv"><span class="label">Name</span><span class="value">{{ result.name }}</span></div>
+  <div class="kv"><span class="label">Phone</span><span class="value">{{ result.phone }}</span></div>
+  <div class="kv">
+    <span class="label">Balance</span>
+    <span class="value" style="color:#e2136e;font-size:1.1rem">
+      &#2547; {{ "%.2f"|format(result.balance) }}
+    </span>
+  </div>
+</div>
+{% endif %}
+{% endblock %}

@@ -1,0 +1,30 @@
+{% extends "base.html" %}
+{% block title %}Home{% endblock %}
+{% block content %}
+<div class="card">
+  <h2>Welcome to bKash Demo</h2>
+  <p style="color:#4a5568;font-size:.95rem;line-height:1.6">
+    This is a simulated mobile financial service for the
+    <strong>SecureCloud-BD</strong> Kubernetes security research project.
+    It generates realistic inter-service traffic so the ML anomaly detector
+    has a meaningful baseline to learn from.
+  </p>
+  <div style="display:flex;gap:1rem;margin-top:1.25rem">
+    <a href="/balance" style="flex:1;display:block;padding:.65rem;background:#e2136e;
+       color:#fff;text-align:center;border-radius:5px;text-decoration:none;font-weight:600">
+      Check Balance
+    </a>
+    <a href="/transfer" style="flex:1;display:block;padding:.65rem;background:#fff;
+       color:#e2136e;text-align:center;border-radius:5px;text-decoration:none;
+       font-weight:600;border:2px solid #e2136e">
+      Send Money
+    </a>
+  </div>
+</div>
+<div class="card" style="font-size:.85rem;color:#718096">
+  <h2 style="color:#718096">Demo accounts</h2>
+  <div class="kv"><span class="label">User 1</span><span class="value">01711000001</span></div>
+  <div class="kv"><span class="label">User 2</span><span class="value">01711000002</span></div>
+  <div class="kv"><span class="label">User 3</span><span class="value">01711000003</span></div>
+</div>
+{% endblock %}

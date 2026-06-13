@@ -1,0 +1,17 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: user-db
+  namespace: apps
+  labels:
+    app: user-db
+    component: bkash-demo
+spec:
+  selector:
+    app: user-db
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: 5432
+  # Headless so StatefulSet pods get stable DNS: user-db-0.user-db.apps.svc.cluster.local
+  clusterIP: None

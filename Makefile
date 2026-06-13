@@ -21,6 +21,7 @@
 
 MINIKUBE_CPUS   ?= 4
 MINIKUBE_MEMORY ?= 6144
+MINIKUBE_DRIVER ?= docker
 UNSW_TRAIN      ?= datasets/unsw_nb15/raw/UNSW_NB15_training-set.csv
 UNSW_TEST       ?= datasets/unsw_nb15/raw/UNSW_NB15_testing-set.csv
 CIC_DIR         ?= datasets/cic_ids2017/raw/MachineLearningCVE
@@ -40,8 +41,10 @@ setup:
 # start-cluster — start Minikube + install Istio + OPA Gatekeeper
 # ──────────────────────────────────────────────────────────────────────
 start-cluster:
-	MINIKUBE_CPUS=$(MINIKUBE_CPUS) MINIKUBE_MEMORY=$(MINIKUBE_MEMORY) \
-	  bash infra/setup-minikube.sh
+	bash infra/scripts/setup-cluster.sh \
+	  --cpus $(MINIKUBE_CPUS) \
+	  --memory $(MINIKUBE_MEMORY) \
+	  --driver $(MINIKUBE_DRIVER)
 
 # ──────────────────────────────────────────────────────────────────────
 # deploy-infra — namespaces, Istio policies, Gatekeeper, Helm app chart

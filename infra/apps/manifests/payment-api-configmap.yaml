@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: payment-api-config
+  namespace: apps
+  labels:
+    app: payment-api
+    component: bkash-demo
+data:
+  DB_HOST: "user-db.apps.svc.cluster.local"
+  DB_PORT: "5432"
+  DB_NAME: "bkash"
+  LOG_LEVEL: "INFO"
+  MIN_TRANSFER_AMOUNT: "1.0"
+  MAX_TRANSFER_AMOUNT: "50000.0"

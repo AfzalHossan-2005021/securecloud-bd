@@ -1,0 +1,30 @@
+# Apply all bKash demo manifests in dependency order.
+# Usage: kubectl apply -k infra/apps/manifests/
+#
+# NOTE: Secrets with <REPLACE> must be created out-of-band before applying.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: apps
+
+resources:
+  # ConfigMaps and Secrets first
+  - user-db-configmap.yaml
+  - user-db-secret.yaml
+  - payment-api-configmap.yaml
+  - payment-api-secret.yaml
+  - frontend-configmap.yaml
+  - frontend-secret.yaml
+  # Database (StatefulSet) before API
+  - user-db-deployment.yaml
+  - user-db-service.yaml
+  # API before frontend
+  - payment-api-deployment.yaml
+  - payment-api-service.yaml
+  # Frontend last
+  - frontend-deployment.yaml
+  - frontend-service.yaml
+
+commonLabels:
+  project: securecloud-bd
+  part-of: bkash-demo
