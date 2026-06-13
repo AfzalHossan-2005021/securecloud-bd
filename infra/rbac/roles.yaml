@@ -1,0 +1,175 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# roles.yaml
+#
+# Minimal RBAC Roles implementing the Principle of Least Privilege (PoLP).
+#
+# Design rules applied:
+#
+#   1. No cluster-level access except where cross-namespace visibility is
+#      unavoidable (Prometheus service-discovery, Filebeat metadata).  These
+#      use ClusterRole rather than Role.
+#
+#   2. No wildcard verbs or resources.  Every rule lists the exact verbs and
+#      resource names needed.  "get,list,watch" is the maximum allowed for any
+#      workload; none of these accounts may create, update, patch, or delete.
+#
+#   3. Roles are bound to specific namespace-scoped ServiceAccounts via
+#      RoleBindings in role-bindings.yaml.  ClusterRoles are bound with
+#      ClusterRoleBindings only where necessary.
+#
+#   4. user-db (PostgreSQL) has NO Role.  It requires zero Kubernetes API calls.
+#      Its ServiceAccount exists purely to give Istio a SPIFFE identity.
+# ──────────────────────────────────────────────────────────────────────────────
+
+# ── frontend: read its own ConfigMap in apps ──────────────────────────────────
+#
+# The Flask frontend needs to read one ConfigMap (frontend-config) to discover
+# the PAYMENT_API_URL and LOG_LEVEL at runtime without baking them into the
+# image.  It does not need to read Secrets — SECRET_KEY is injected as an env
+# var from the Deployment spec (which reads from the Secret server-side before
+# scheduling the pod).  This means only the Deployment controller, not the
+# pod's service account, needs Secret access.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: frontend-reader
+  namespace: apps
+  labels:
+    securecloud.io/component: bkash-frontend
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    resourceNames: ["frontend-config"]   # locked to a single named ConfigMap
+    verbs: ["get", "watch"]
+
+---
+# ── payment-api: read ConfigMap + Secret in apps ──────────────────────────────
+#
+# The FastAPI service needs:
+#   - Its ConfigMap (payment-api-config) for DB_HOST, DB_NAME, transfer limits.
+#   - Its Secret (payment-api-secret) for DB_PASSWORD, JWT_SECRET.
+#
+# resourceNames restricts access to the specific objects owned by this service.
+# If the Secret is rotated, the new Secret must carry the same name (or the
+# resourceNames list must be updated).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: payment-api-reader
+  namespace: apps
+  labels:
+    securecloud.io/component: bkash-payment-api
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    resourceNames: ["payment-api-config"]
+    verbs: ["get", "watch"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames: ["payment-api-secret"]
+    verbs: ["get"]   # no watch on Secrets — avoids keeping a watch stream open
+                     # to the API server for sensitive data
+
+---
+# ── threat-api: read its own ConfigMap in securecloud ────────────────────────
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: threat-api-reader
+  namespace: securecloud
+  labels:
+    securecloud.io/component: threat-scoring-api
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    resourceNames: ["threat-api-config"]
+    verbs: ["get", "watch"]
+
+---
+# ── ml-infer: read ConfigMaps in monitoring (cross-namespace, needs ClusterRole)
+#
+# ml-infer needs to read ConfigMaps in the monitoring namespace to discover
+# the Prometheus endpoint for publishing its anomaly metrics without a hardcoded
+# cluster IP.  A Role is namespace-scoped and cannot grant access to another
+# namespace; a ClusterRole with a specific RoleBinding in the monitoring namespace
+# achieves the same scoping (see role-bindings.yaml).
+#
+# Why ClusterRole and not Role?
+#   Kubernetes RBAC does not allow a Role in namespace A to grant access to
+#   resources in namespace B.  A ClusterRole + RoleBinding (NOT ClusterRoleBinding)
+#   in the target namespace effectively acts as a cross-namespace Role —
+#   the binding scopes the grant to the monitoring namespace only.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: ml-infer-monitoring-reader
+  labels:
+    securecloud.io/component: ml-inference
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    resourceNames: ["prometheus-config"]
+    verbs: ["get"]
+
+---
+# ── prometheus: cluster-wide service discovery ────────────────────────────────
+#
+# Prometheus requires read access to pods, services, endpoints, nodes, and
+# namespaces across the entire cluster for its Kubernetes service-discovery
+# scrape_configs.  This is the minimal set for the standard Prometheus
+# kubernetes-apiservers, node, pods, and cadvisor jobs.
+#
+# Reference: https://prometheus.io/docs/prometheus/latest/configuration/configuration/#kubernetes_sd_config
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: prometheus-scraper
+  labels:
+    securecloud.io/component: prometheus
+rules:
+  - apiGroups: [""]
+    resources:
+      - nodes
+      - nodes/proxy
+      - nodes/metrics
+      - services
+      - endpoints
+      - pods
+      - namespaces
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["extensions", "networking.k8s.io"]
+    resources: ["ingresses"]
+    verbs: ["get", "list", "watch"]
+  # Non-resource URL for the /metrics endpoint on the API server itself
+  - nonResourceURLs: ["/metrics", "/metrics/cadvisor"]
+    verbs: ["get"]
+
+---
+# ── filebeat: cluster-wide pod/namespace/node read for metadata enrichment ───
+#
+# Filebeat's add_kubernetes_metadata processor calls the Kubernetes API to
+# enrich every log line with pod name, namespace, labels, and node name.
+# This requires cluster-wide read on the three resource types below — it
+# cannot be scoped to a single namespace because Filebeat ships logs from all
+# namespaces via its DaemonSet on every node.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: filebeat-metadata-reader
+  labels:
+    securecloud.io/component: filebeat-log-shipper
+rules:
+  - apiGroups: [""]
+    resources:
+      - namespaces
+      - pods
+      - nodes
+    verbs: ["get", "list", "watch"]
+  # Needed for Filebeat's Kubernetes provider to list and watch Deployments/ReplicaSets
+  - apiGroups: ["apps"]
+    resources:
+      - replicasets
+      - deployments
+      - statefulsets
+      - daemonsets
+    verbs: ["get", "list", "watch"]

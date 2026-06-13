@@ -1,0 +1,141 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# role-bindings.yaml
+#
+# Connects ServiceAccounts (service-accounts.yaml) to Roles/ClusterRoles
+# (roles.yaml) using RoleBindings and ClusterRoleBindings.
+#
+# Key pattern — ClusterRole + RoleBinding (not ClusterRoleBinding):
+#
+#   For ml-infer, Prometheus, and Filebeat we defined ClusterRoles because
+#   the permissions needed to span namespaces.  However we bind them with:
+#
+#     ClusterRole + RoleBinding in the TARGET namespace
+#       → grants the role only within that namespace (scoped binding)
+#
+#     ClusterRole + ClusterRoleBinding
+#       → grants the role cluster-wide (unscoped)
+#
+#   Prometheus and Filebeat genuinely need cluster-wide access (service
+#   discovery, metadata enrichment), so they get ClusterRoleBindings.
+#   ml-infer only needs access to the monitoring namespace, so it gets a
+#   RoleBinding in monitoring.
+# ──────────────────────────────────────────────────────────────────────────────
+
+# ── frontend → frontend-reader (Role in apps) ─────────────────────────────────
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: frontend-reader-binding
+  namespace: apps
+  labels:
+    securecloud.io/component: bkash-frontend
+subjects:
+  - kind: ServiceAccount
+    name: frontend
+    namespace: apps
+roleRef:
+  kind: Role
+  name: frontend-reader
+  apiGroup: rbac.authorization.k8s.io
+
+---
+# ── payment-api → payment-api-reader (Role in apps) ──────────────────────────
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: payment-api-reader-binding
+  namespace: apps
+  labels:
+    securecloud.io/component: bkash-payment-api
+subjects:
+  - kind: ServiceAccount
+    name: payment-api
+    namespace: apps
+roleRef:
+  kind: Role
+  name: payment-api-reader
+  apiGroup: rbac.authorization.k8s.io
+
+---
+# ── threat-api → threat-api-reader (Role in securecloud) ─────────────────────
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: threat-api-reader-binding
+  namespace: securecloud
+  labels:
+    securecloud.io/component: threat-scoring-api
+subjects:
+  - kind: ServiceAccount
+    name: threat-api
+    namespace: securecloud
+roleRef:
+  kind: Role
+  name: threat-api-reader
+  apiGroup: rbac.authorization.k8s.io
+
+---
+# ── ml-infer → ml-infer-monitoring-reader (scoped to monitoring namespace) ───
+#
+# This is a RoleBinding in the monitoring namespace that references a
+# ClusterRole.  The result: ml-infer (in ml-engine namespace) can read
+# prometheus-config ConfigMap in monitoring — and ONLY in monitoring.
+# It does NOT receive cluster-wide access.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: ml-infer-monitoring-reader-binding
+  namespace: monitoring                  # grant is scoped to this namespace
+  labels:
+    securecloud.io/component: ml-inference
+subjects:
+  - kind: ServiceAccount
+    name: ml-infer
+    namespace: ml-engine                 # subject lives in a different namespace
+roleRef:
+  kind: ClusterRole
+  name: ml-infer-monitoring-reader
+  apiGroup: rbac.authorization.k8s.io
+
+---
+# ── prometheus → prometheus-scraper (ClusterRoleBinding) ─────────────────────
+#
+# Prometheus needs cluster-wide access to pods, services, endpoints, and nodes
+# for Kubernetes service discovery.  This is the one place where a
+# ClusterRoleBinding is justified — scoping it to a single namespace would
+# prevent Prometheus from discovering targets in other namespaces.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: prometheus-scraper-binding
+  labels:
+    securecloud.io/component: prometheus
+subjects:
+  - kind: ServiceAccount
+    name: prometheus
+    namespace: monitoring
+roleRef:
+  kind: ClusterRole
+  name: prometheus-scraper
+  apiGroup: rbac.authorization.k8s.io
+
+---
+# ── filebeat → filebeat-metadata-reader (ClusterRoleBinding) ─────────────────
+#
+# Filebeat runs as a DaemonSet on every node and ships logs from all namespaces.
+# The add_kubernetes_metadata processor must list/watch pods across the cluster
+# to enrich log events.  Cluster-wide binding is required.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: filebeat-metadata-reader-binding
+  labels:
+    securecloud.io/component: filebeat-log-shipper
+subjects:
+  - kind: ServiceAccount
+    name: filebeat
+    namespace: siem
+roleRef:
+  kind: ClusterRole
+  name: filebeat-metadata-reader
+  apiGroup: rbac.authorization.k8s.io

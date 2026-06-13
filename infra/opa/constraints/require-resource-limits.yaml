@@ -1,0 +1,39 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# Constraint: RequireResourceLimits — apps + ml-engine + securecloud namespaces
+#
+# Applies the RequireResourceLimits ConstraintTemplate to workload namespaces.
+# Exempt namespaces (kube-system, istio-system, gatekeeper-system) are listed
+# in the parameters because system components often omit limits intentionally
+# and are managed by their own operators.
+# ──────────────────────────────────────────────────────────────────────────────
+apiVersion: constraints.gatekeeper.sh/v1beta1
+kind: RequireResourceLimits
+metadata:
+  name: require-resource-limits-workloads
+  annotations:
+    securecloud.io/rationale: >
+      Single-node 8 GB workstation budget. Unbounded containers risk OOM kill
+      cascades that bring down the entire research cluster mid-experiment.
+      All workload containers already declare limits in their manifests;
+      this constraint catches any accidental omission at admission time.
+spec:
+  enforcementAction: deny
+
+  match:
+    kinds:
+      - apiGroups: [""]
+        kinds: ["Pod"]
+    namespaces:
+      - apps
+      - ml-engine
+      - securecloud
+      - siem
+      - monitoring
+
+  parameters:
+    # System namespaces where resource limits may legitimately be absent
+    exemptNamespaces:
+      - kube-system
+      - istio-system
+      - gatekeeper-system
+      - cert-manager

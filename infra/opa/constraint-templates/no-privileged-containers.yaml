@@ -1,0 +1,59 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# ConstraintTemplate: NoPrivilegedContainers
+#
+# Blocks any Pod from running containers in privileged mode
+# (securityContext.privileged: true).
+#
+# Why this matters:
+#   A privileged container has the same capabilities as the root process on the
+#   host node.  It can mount the host filesystem, load kernel modules, access
+#   all devices, and escape namespace isolation.  Running privileged containers
+#   in a security research cluster that intentionally runs attack simulations
+#   is particularly dangerous — a simulated attacker gaining code execution in
+#   a privileged pod trivially owns the entire node.
+#
+# CIS Kubernetes Benchmark: 5.2.1
+# NSA Kubernetes Hardening Guide: §4.1
+# ──────────────────────────────────────────────────────────────────────────────
+apiVersion: templates.gatekeeper.sh/v1
+kind: ConstraintTemplate
+metadata:
+  name: noprivilegedcontainers
+  annotations:
+    description: "Blocks pods with privileged containers (securityContext.privileged: true)"
+    securecloud.io/cis-control: "5.2.1"
+spec:
+  crd:
+    spec:
+      names:
+        kind: NoPrivilegedContainers    # Constraint CRD kind this template creates
+      validation:
+        # No parameters — this policy is unconditional; there are no
+        # legitimate privileged containers in this cluster.
+        openAPIV3Schema:
+          type: object
+          properties: {}
+
+  targets:
+    - target: admission.k8s.gatekeeper.sh
+      rego: |
+        package noprivilegedcontainers
+
+        # Collect all containers (init + regular) from the pod spec
+        all_containers[container] {
+          container := input.review.object.spec.containers[_]
+        }
+
+        all_containers[container] {
+          container := input.review.object.spec.initContainers[_]
+        }
+
+        # Violation: any container with privileged: true
+        violation[{"msg": msg}] {
+          container := all_containers[_]
+          container.securityContext.privileged == true
+          msg := sprintf(
+            "Container '%v' in Pod '%v/%v' sets securityContext.privileged: true. Privileged containers are not permitted (CIS 5.2.1). Remove the securityContext.privileged field or set it to false.",
+            [container.name, input.review.object.metadata.namespace, input.review.object.metadata.name]
+          )
+        }

@@ -1,0 +1,90 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# ConstraintTemplate: AllowedRegistries
+#
+# Blocks images from any registry not in an explicit allowlist.
+#
+# Why this matters:
+#   Supply-chain attacks often involve substituting a legitimate image pull with
+#   a malicious image from an attacker-controlled registry.  By restricting to
+#   a known-good set of registries (docker.io, ghcr.io, registry.k8s.io, and
+#   the local Minikube registry for local builds), we block this class of attack
+#   at admission time.
+#
+#   Note: The constraint (not the template) specifies the allowed registry list
+#   so the list can be updated without rewriting Rego.
+#
+# CIS Kubernetes Benchmark: 5.5.1
+# ──────────────────────────────────────────────────────────────────────────────
+apiVersion: templates.gatekeeper.sh/v1
+kind: ConstraintTemplate
+metadata:
+  name: allowedregistries
+  annotations:
+    description: "Blocks container images from registries not in the allowlist"
+    securecloud.io/cis-control: "5.5.1"
+spec:
+  crd:
+    spec:
+      names:
+        kind: AllowedRegistries
+      validation:
+        openAPIV3Schema:
+          type: object
+          properties:
+            # List of allowed registry prefixes (e.g. "docker.io", "ghcr.io")
+            allowedRegistries:
+              type: array
+              items:
+                type: string
+
+  targets:
+    - target: admission.k8s.gatekeeper.sh
+      rego: |
+        package allowedregistries
+
+        # All containers (init + regular)
+        all_containers[c] { c := input.review.object.spec.containers[_] }
+        all_containers[c] { c := input.review.object.spec.initContainers[_] }
+
+        # Extract the registry prefix from an image string.
+        # Images can be:
+        #   nginx                          → implicit docker.io/library/nginx
+        #   docker.io/library/nginx:1.25   → docker.io
+        #   ghcr.io/owner/image:tag        → ghcr.io
+        #   localhost:5000/myimage:tag     → localhost:5000 (Minikube local)
+        #
+        # Strategy: if the first component of the path contains a dot or colon
+        # it is a registry host; otherwise the image is a bare docker.io pull.
+        image_registry(image) := registry {
+          parts := split(image, "/")
+          first := parts[0]
+          # first component contains a dot (ghcr.io) or colon (localhost:5000)
+          contains(first, ".")
+          registry := first
+        }
+
+        image_registry(image) := "docker.io" {
+          parts := split(image, "/")
+          first := parts[0]
+          not contains(first, ".")
+          not contains(first, ":")
+        }
+
+        # Build a set from the constraint parameters for O(1) lookup
+        allowed := {r | r := input.parameters.allowedRegistries[_]}
+
+        # Violation: image registry not in the allowed set
+        violation[{"msg": msg}] {
+          container := all_containers[_]
+          reg := image_registry(container.image)
+          not allowed[reg]
+          msg := sprintf(
+            "Container '%v' in Pod '%v/%v' uses image '%v' from registry '%v', which is not in the allowed registries list: %v. Use an image from an approved registry.",
+            [container.name,
+             input.review.object.metadata.namespace,
+             input.review.object.metadata.name,
+             container.image,
+             reg,
+             concat(", ", allowed)]
+          )
+        }

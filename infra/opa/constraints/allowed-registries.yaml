@@ -1,0 +1,46 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# Constraint: AllowedRegistries — apps + ml-engine + securecloud namespaces
+#
+# Permits images only from the listed registry prefixes.
+#
+# Approved registries:
+#   docker.io       — official images: postgres:15, python:3.10, nginx
+#   ghcr.io         — GitHub Container Registry: Falco, Gatekeeper, etc.
+#   registry.k8s.io — Kubernetes project images: pause, metrics-server, coredns
+#   quay.io         — Red Hat / Istio images
+#   localhost        — Minikube local registry (eval $(minikube docker-env) builds)
+#
+# To add a new registry, update allowedRegistries below.  Do NOT use a wildcard
+# (e.g. "*") — that defeats the purpose of this constraint entirely.
+# ──────────────────────────────────────────────────────────────────────────────
+apiVersion: constraints.gatekeeper.sh/v1beta1
+kind: AllowedRegistries
+metadata:
+  name: allowed-registries-workloads
+  annotations:
+    securecloud.io/rationale: >
+      Prevents supply-chain substitution attacks where an attacker tricks the
+      cluster into pulling a malicious image from an unknown registry.
+      All images used in this project are sourced from one of the five approved
+      registries listed in the parameters.
+spec:
+  enforcementAction: deny
+
+  match:
+    kinds:
+      - apiGroups: [""]
+        kinds: ["Pod"]
+    namespaces:
+      - apps
+      - ml-engine
+      - securecloud
+      - siem
+      - monitoring
+
+  parameters:
+    allowedRegistries:
+      - "docker.io"
+      - "ghcr.io"
+      - "registry.k8s.io"
+      - "quay.io"
+      - "localhost"        # Minikube local builds via `eval $(minikube docker-env)`

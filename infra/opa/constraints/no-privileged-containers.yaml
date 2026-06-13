@@ -1,0 +1,31 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# Constraint: NoPrivilegedContainers — apps namespace
+#
+# Applies the NoPrivilegedContainers ConstraintTemplate to the apps namespace.
+# Any pod admission request to the apps namespace that includes a container
+# with securityContext.privileged: true will be rejected by the Gatekeeper
+# admission webhook before the pod is scheduled.
+# ──────────────────────────────────────────────────────────────────────────────
+apiVersion: constraints.gatekeeper.sh/v1beta1
+kind: NoPrivilegedContainers
+metadata:
+  name: deny-privileged-containers-apps
+  annotations:
+    securecloud.io/rationale: >
+      Enforces non-privileged workloads in the bKash demo application namespace.
+      All three demo services (frontend, payment-api, user-db) run as UID 1001
+      with readOnlyRootFilesystem and no capabilities — no legitimate container
+      here should ever require privileged mode.
+spec:
+  # enforcement action:
+  #   deny  — reject the admission request outright (production setting)
+  #   warn  — allow but emit a warning (useful during initial rollout)
+  #   dryrun — allow, audit only (no rejection)
+  enforcementAction: deny
+
+  # Match scope: apps namespace only
+  match:
+    kinds:
+      - apiGroups: [""]
+        kinds: ["Pod"]
+    namespaces: ["apps"]

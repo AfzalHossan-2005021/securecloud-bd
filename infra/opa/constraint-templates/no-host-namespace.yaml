@@ -1,0 +1,68 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# ConstraintTemplate: NoHostNamespace
+#
+# Blocks Pods from using hostNetwork, hostPID, or hostIPC.
+#
+# Why these matter:
+#
+#   hostNetwork: true  — The pod shares the node's network namespace.  It sees
+#     all traffic on all network interfaces, including the control plane, IPMI,
+#     and any inter-node VPN.  This breaks network isolation entirely and can be
+#     used to intercept or inject traffic outside the cluster overlay network.
+#
+#   hostPID: true  — The pod sees all processes on the node.  An attacker can
+#     use /proc/<pid>/mem to read the memory of other processes, extract
+#     secrets from running containers, or ptrace the kubelet itself.
+#
+#   hostIPC: true  — The pod can attach to IPC shared memory segments of other
+#     processes on the node, including database shared-memory regions and any
+#     process using System V IPC for inter-process communication.
+#
+# CIS Kubernetes Benchmark: 5.2.2, 5.2.3, 5.2.5
+# NSA Kubernetes Hardening Guide: §4.1
+# ──────────────────────────────────────────────────────────────────────────────
+apiVersion: templates.gatekeeper.sh/v1
+kind: ConstraintTemplate
+metadata:
+  name: nohostnamespace
+  annotations:
+    description: "Blocks pods that use hostNetwork, hostPID, or hostIPC"
+    securecloud.io/cis-controls: "5.2.2, 5.2.3, 5.2.5"
+spec:
+  crd:
+    spec:
+      names:
+        kind: NoHostNamespace
+      validation:
+        openAPIV3Schema:
+          type: object
+          properties: {}
+
+  targets:
+    - target: admission.k8s.gatekeeper.sh
+      rego: |
+        package nohostnamespace
+
+        violation[{"msg": msg}] {
+          input.review.object.spec.hostNetwork == true
+          msg := sprintf(
+            "Pod '%v/%v' sets spec.hostNetwork: true. Host network access is not permitted (CIS 5.2.2). Remove spec.hostNetwork or set it to false.",
+            [input.review.object.metadata.namespace, input.review.object.metadata.name]
+          )
+        }
+
+        violation[{"msg": msg}] {
+          input.review.object.spec.hostPID == true
+          msg := sprintf(
+            "Pod '%v/%v' sets spec.hostPID: true. Host PID namespace access is not permitted (CIS 5.2.3). Remove spec.hostPID or set it to false.",
+            [input.review.object.metadata.namespace, input.review.object.metadata.name]
+          )
+        }
+
+        violation[{"msg": msg}] {
+          input.review.object.spec.hostIPC == true
+          msg := sprintf(
+            "Pod '%v/%v' sets spec.hostIPC: true. Host IPC namespace access is not permitted (CIS 5.2.5). Remove spec.hostIPC or set it to false.",
+            [input.review.object.metadata.namespace, input.review.object.metadata.name]
+          )
+        }

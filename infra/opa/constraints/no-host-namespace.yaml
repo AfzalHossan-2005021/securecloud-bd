@@ -1,0 +1,28 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# Constraint: NoHostNamespace — apps + ml-engine + securecloud namespaces
+#
+# Blocks pods from using hostNetwork, hostPID, or hostIPC in workload namespaces.
+# ──────────────────────────────────────────────────────────────────────────────
+apiVersion: constraints.gatekeeper.sh/v1beta1
+kind: NoHostNamespace
+metadata:
+  name: deny-host-namespace-workloads
+  annotations:
+    securecloud.io/rationale: >
+      The attack-sim namespace intentionally runs adversarial workloads.
+      If a simulated attacker escapes a container, hostNetwork/PID/IPC would
+      give them immediate node-level access.  Blocking these fields in workload
+      namespaces limits lateral movement even if a container escape succeeds.
+spec:
+  enforcementAction: deny
+
+  match:
+    kinds:
+      - apiGroups: [""]
+        kinds: ["Pod"]
+    namespaces:
+      - apps
+      - ml-engine
+      - securecloud
+      - siem
+      - monitoring

@@ -1,0 +1,71 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# ConstraintTemplate: RequireResourceLimits
+#
+# Requires every container to specify cpu and memory limits.
+#
+# Why this matters:
+#   On a single 8 GB workstation running the full SecureCloud-BD stack
+#   (ELK, Istio, ML training, attack-sim), an unbounded container can exhaust
+#   all available memory and trigger an OOM kill cascade that takes down the
+#   cluster.  Resource limits also prevent a compromised or misbehaving pod
+#   from degrading other workloads (resource-based DoS).
+#
+# CIS Kubernetes Benchmark: 5.2.4
+# ──────────────────────────────────────────────────────────────────────────────
+apiVersion: templates.gatekeeper.sh/v1
+kind: ConstraintTemplate
+metadata:
+  name: requireresourcelimits
+  annotations:
+    description: "Requires every container to specify cpu and memory limits"
+    securecloud.io/cis-control: "5.2.4"
+spec:
+  crd:
+    spec:
+      names:
+        kind: RequireResourceLimits
+      validation:
+        openAPIV3Schema:
+          type: object
+          properties:
+            # Optional: namespaces to exempt (e.g. kube-system, istio-system)
+            exemptNamespaces:
+              type: array
+              items:
+                type: string
+
+  targets:
+    - target: admission.k8s.gatekeeper.sh
+      rego: |
+        package requireresourcelimits
+
+        # Build a set of exempt namespaces from the constraint parameters
+        exempt_namespaces := {ns | ns := input.parameters.exemptNamespaces[_]}
+
+        # All containers (init + regular)
+        all_containers[c] { c := input.review.object.spec.containers[_] }
+        all_containers[c] { c := input.review.object.spec.initContainers[_] }
+
+        # Violation: namespace not exempt AND container missing cpu limit
+        violation[{"msg": msg}] {
+          ns := input.review.object.metadata.namespace
+          not exempt_namespaces[ns]
+          container := all_containers[_]
+          not container.resources.limits.cpu
+          msg := sprintf(
+            "Container '%v' in Pod '%v/%v' has no cpu limit. All containers must set resources.limits.cpu (CIS 5.2.4).",
+            [container.name, ns, input.review.object.metadata.name]
+          )
+        }
+
+        # Violation: namespace not exempt AND container missing memory limit
+        violation[{"msg": msg}] {
+          ns := input.review.object.metadata.namespace
+          not exempt_namespaces[ns]
+          container := all_containers[_]
+          not container.resources.limits.memory
+          msg := sprintf(
+            "Container '%v' in Pod '%v/%v' has no memory limit. All containers must set resources.limits.memory (CIS 5.2.4).",
+            [container.name, ns, input.review.object.metadata.name]
+          )
+        }
