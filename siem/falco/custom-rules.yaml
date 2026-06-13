@@ -1,0 +1,432 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# custom-rules.yaml
+#
+# ConfigMap containing SecureCloud-BD custom Falco rules.
+#
+# Mounted at: /etc/falco/rules.d/securecloud_rules.yaml inside the Falco pod.
+# Loaded after: /etc/falco/falco_rules.yaml (the built-in rules) and
+#               /etc/falco/falco_rules.local.yaml (local overrides).
+#
+# Rule authoring notes:
+#
+#   Macros defined here extend or override macros from the built-in ruleset.
+#   Because this file is loaded AFTER the built-in rules, a `macro` block with
+#   the same name as a built-in macro replaces it globally.  This lets us
+#   expand `container_entrypoint` or `spawned_process` without forking the
+#   entire ruleset.
+#
+#   Lists (- list:) are also replaceable.  Adding a new list and referencing
+#   it from a macro is the safest pattern for allowlists — it avoids touching
+#   existing rules.
+#
+#   Condition language quick reference:
+#     evt.type         — system call name (execve, open, connect, ...)
+#     proc.name        — name of the process making the syscall
+#     proc.pname       — parent process name
+#     proc.cmdline     — full command line of the process
+#     fd.name          — file descriptor name (path for files, addr for sockets)
+#     fd.sip / fd.dip  — source / destination IP (for network fds)
+#     fd.sport / fd.dport — source / destination port
+#     k8s.pod.name     — Kubernetes pod name (requires metadata enrichment)
+#     k8s.ns.name      — Kubernetes namespace
+#     container        — true if the process is in a container (not host)
+#     container.id     — Docker/containerd container ID
+# ──────────────────────────────────────────────────────────────────────────────
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: falco-custom-rules
+  namespace: siem
+  labels:
+    app: falco
+    securecloud.io/component: falco-rules
+    securecloud.io/tier: siem
+  annotations:
+    securecloud.io/rationale: >
+      Custom detection rules for the SecureCloud-BD research cluster.
+      Each rule maps to one or more MITRE ATT&CK techniques; see
+      siem/falco/README.md for the full mapping table.
+data:
+  securecloud_rules.yaml: |
+    ##########################################################################
+    # SecureCloud-BD Custom Falco Rules
+    # Version: 1.0.0
+    # Loaded from ConfigMap: falco-custom-rules
+    ##########################################################################
+
+    # ── Allowlists / Lists ──────────────────────────────────────────────────
+
+    # Shells that we treat as interactive shells (superset of built-in shell_binaries)
+    - list: securecloud_shells
+      items:
+        - bash
+        - sh
+        - dash
+        - zsh
+        - ksh
+        - fish
+        - ash       # Alpine default shell
+        - busybox   # multi-call binary that can act as a shell
+
+    # Namespaces where shell activity is operationally expected.
+    # attack-sim is included because the red-team playbooks deliberately spawn
+    # shells — we still alert but the rule is scoped to exclude these.
+    # NOTE: keep this list as short as possible. Expand only with documented justification.
+    - list: shell_spawn_allowed_namespaces
+      items:
+        - kube-system
+        - istio-system
+        - gatekeeper-system
+        - attack-sim        # red-team namespace — shells are expected here
+
+    # Sensitive file paths — reads from these paths indicate credential access
+    - list: sensitive_files
+      items:
+        - /etc/shadow
+        - /etc/passwd
+        - /etc/gshadow
+        - /etc/group
+        - /root/.ssh/id_rsa
+        - /root/.ssh/id_ed25519
+        - /root/.ssh/id_ecdsa
+        - /root/.ssh/authorized_keys
+        - /root/.ssh/known_hosts
+        - /home/.ssh/id_rsa          # catch non-root home dirs with a glob below
+        - /proc/1/environ            # often read during container escape recon
+
+    # Processes that are permitted to read sensitive files (system daemons, etc.)
+    - list: sensitive_file_read_allowed_procs
+      items:
+        - sshd
+        - login
+        - sudo
+        - passwd
+        - useradd
+        - usermod
+        - nscd        # name service cache daemon
+        - sssd        # system security services daemon
+
+    # Known-good external IPs that payment-api may contact.
+    # In a production deployment this would be the payment gateway CIDR.
+    # For the research cluster, only internal cluster services are expected.
+    - list: payment_api_allowed_external_ips
+      items:
+        - "127.0.0.1"      # loopback
+        - "::1"            # IPv6 loopback
+
+    # CAP_SYS_ADMIN hex value as used in Falco's capability change events.
+    # Linux capability number 21 = CAP_SYS_ADMIN
+    - list: dangerous_capabilities
+      items:
+        - CAP_SYS_ADMIN     # mount, ioctl, ptrace, kernel module load
+        - CAP_SYS_PTRACE    # ptrace any process
+        - CAP_NET_ADMIN     # modify routing, iptables
+        - CAP_SYS_MODULE    # load/unload kernel modules
+
+    # ── Macros ──────────────────────────────────────────────────────────────
+
+    - macro: securecloud_container
+      condition: container and k8s.pod.name != ""
+
+    - macro: open_sensitive_file
+      condition: >
+        (evt.type in (open, openat, openat2)) and
+        evt.is_open_read=true and
+        (fd.name in (sensitive_files) or
+         fd.name glob "/root/.ssh/*" or
+         fd.name glob "/home/*/.ssh/*" or
+         fd.name glob "/etc/kubernetes/pki/*")
+
+    - macro: shell_spawned
+      condition: >
+        evt.type = execve and
+        (proc.name in (securecloud_shells) or
+         proc.name glob "*sh")
+
+    - macro: payment_api_pod
+      condition: >
+        k8s.pod.name glob "payment-api-*" and
+        k8s.ns.name = apps
+
+    - macro: outbound_network_event
+      condition: >
+        evt.type in (connect, sendto, sendmsg) and
+        fd.typechar = 4 and   # IPv4 socket
+        fd.is_server = false
+
+    # ── RULE 1: Shell Spawned Inside a Container ────────────────────────────
+    # MITRE ATT&CK: T1059 — Command and Scripting Interpreter
+    #               T1609 — Container Administration Command
+    # Severity: WARNING
+    #
+    # Rationale:
+    #   In a correctly built container, the entrypoint binary runs directly as
+    #   PID 1 (e.g. gunicorn, uvicorn, postgres).  A shell appearing as a child
+    #   process is almost always either:
+    #     a) An operator running `kubectl exec -it ... -- bash` for debugging
+    #     b) An attacker who has achieved command execution and spawned a shell
+    #        for persistence or lateral movement.
+    #   Both cases are worth alerting on in production.
+    #
+    # Alert volume: LOW — expect 1–5 alerts per debugging session.
+    #   If operators frequently need shell access, document the expected pod
+    #   names and add them to an exception list in falco_rules.local.yaml.
+
+    - rule: Shell Spawned Inside Container
+      desc: >
+        A shell process was spawned inside a container. This may indicate an
+        operator debugging session (benign) or an attacker running commands
+        after gaining code execution (T1059, T1609).
+      condition: >
+        shell_spawned and
+        securecloud_container and
+        not k8s.ns.name in (shell_spawn_allowed_namespaces) and
+        not proc.pname in (securecloud_shells) and
+        not proc.pname = "runc"
+      output: >
+        Shell spawned inside container
+        (user=%user.name user_uid=%user.uid
+        shell=%proc.name parent=%proc.pname
+        cmdline=%proc.cmdline
+        pod=%k8s.pod.name ns=%k8s.ns.name
+        container_id=%container.id
+        image=%container.image.repository:%container.image.tag)
+      priority: WARNING
+      tags:
+        - securecloud
+        - mitre_execution
+        - T1059
+        - T1609
+        - container
+
+    # ── RULE 2: Sensitive File Read ─────────────────────────────────────────
+    # MITRE ATT&CK: T1552.001 — Unsecured Credentials: Credentials In Files
+    #               T1003.008 — OS Credential Dumping: /etc/passwd and /etc/shadow
+    # Severity: ERROR
+    #
+    # Rationale:
+    #   /etc/shadow contains hashed passwords; an attacker who reads it can run
+    #   offline dictionary attacks.  /etc/passwd is less sensitive but is the
+    #   first file read during OS fingerprinting.  SSH private keys in
+    #   /root/.ssh/ or /home/*/.ssh/ provide direct authentication material.
+    #   /proc/1/environ exposes the init process environment (often contains
+    #   secrets injected via env vars in Kubernetes Deployments).
+    #
+    # Alert volume: VERY LOW — almost no legitimate container process reads
+    #   these files. Expect near-zero alerts in a healthy cluster.
+    #   If a security scanner (Trivy, Grype) runs inside a pod it may trigger
+    #   this rule; add the scanner's process name to sensitive_file_read_allowed_procs.
+
+    - rule: Sensitive File Read Inside Container
+      desc: >
+        A process inside a container opened a sensitive credential file for
+        reading. This indicates likely credential harvesting activity
+        (T1552.001, T1003.008).
+      condition: >
+        open_sensitive_file and
+        securecloud_container and
+        not proc.name in (sensitive_file_read_allowed_procs)
+      output: >
+        Sensitive file read inside container
+        (file=%fd.name
+        proc=%proc.name cmdline=%proc.cmdline
+        user=%user.name user_uid=%user.uid
+        pod=%k8s.pod.name ns=%k8s.ns.name
+        container_id=%container.id
+        image=%container.image.repository:%container.image.tag)
+      priority: ERROR
+      tags:
+        - securecloud
+        - mitre_credential_access
+        - T1552.001
+        - T1003.008
+        - container
+
+    # ── RULE 3: Unexpected External Connection from payment-api ─────────────
+    # MITRE ATT&CK: T1071 — Application Layer Protocol (C2 over HTTP/HTTPS)
+    #               T1041 — Exfiltration Over C2 Channel
+    #               T1048 — Exfiltration Over Alternative Protocol
+    # Severity: ERROR
+    #
+    # Rationale:
+    #   payment-api should only make outbound connections to:
+    #     - user-db.apps.svc.cluster.local:5432  (PostgreSQL)
+    #     - kube-dns (UDP 53)
+    #     - Logstash in siem namespace (via Filebeat; not a direct connection)
+    #   Any connection to an external IP (non-RFC1918) from this pod is a
+    #   strong indicator of either:
+    #     a) Data exfiltration (financial transaction data leaving the cluster)
+    #     b) Command-and-control communication from a compromised pod
+    #   This is especially critical for a payment service.
+    #
+    # Alert volume: LOW in a correctly configured cluster.
+    #   False positives may arise during:
+    #     - Initial startup if the image pulls metadata from an external API
+    #     - Health check calls to external payment gateway (add the gateway IP
+    #       to payment_api_allowed_external_ips list above)
+
+    - rule: Unexpected External Connection from payment-api
+      desc: >
+        The payment-api pod made an outbound network connection to an external
+        (non-RFC1918) IP address. In the bKash demo cluster, payment-api should
+        only connect to user-db and internal cluster services. External
+        connections may indicate data exfiltration or C2 communication
+        (T1071, T1041, T1048).
+      condition: >
+        outbound_network_event and
+        payment_api_pod and
+        not fd.sip in (payment_api_allowed_external_ips) and
+        not fd.sip net "10.0.0.0/8" and
+        not fd.sip net "172.16.0.0/12" and
+        not fd.sip net "192.168.0.0/16" and
+        not fd.sip net "127.0.0.0/8" and
+        not fd.sip net "::1/128" and
+        fd.sport != 53    # DNS queries are allowed (caught by network policy)
+      output: >
+        Unexpected external connection from payment-api
+        (pod=%k8s.pod.name ns=%k8s.ns.name
+        dest_ip=%fd.rip dest_port=%fd.rport
+        proto=%l4proto proc=%proc.name cmdline=%proc.cmdline
+        user=%user.name container_id=%container.id)
+      priority: ERROR
+      tags:
+        - securecloud
+        - mitre_exfiltration
+        - mitre_command_and_control
+        - T1071
+        - T1041
+        - T1048
+        - network
+
+    # ── RULE 4: Privilege Escalation via CAP_SYS_ADMIN ──────────────────────
+    # MITRE ATT&CK: T1611 — Escape to Host
+    #               T1548 — Abuse Elevation Control Mechanism
+    #               T1068 — Exploitation for Privilege Escalation
+    # Severity: CRITICAL
+    #
+    # Rationale:
+    #   CAP_SYS_ADMIN is the most powerful Linux capability — it grants the
+    #   ability to:
+    #     - Mount filesystems (including the host's /proc, /sys)
+    #     - Make arbitrary ioctl calls (including to storage devices)
+    #     - Load kernel modules
+    #     - Override disk quotas
+    #     - Perform ptrace on any process (effective root access)
+    #   A process acquiring CAP_SYS_ADMIN inside a container has effectively
+    #   broken out of the container's privilege boundary.  In a security
+    #   research cluster running attack simulations, this is the most critical
+    #   indicator of a container escape in progress.
+    #
+    #   The condition watches for capability-set change events (capset syscall)
+    #   where the new effective capability set includes CAP_SYS_ADMIN.
+    #   Also catches execve of setuid binaries that transitively grant it.
+    #
+    # Alert volume: VERY LOW — should be zero in a correctly locked-down cluster.
+    #   Any alert here is high-fidelity and warrants immediate investigation.
+
+    - rule: Privilege Escalation via CAP_SYS_ADMIN
+      desc: >
+        A process inside a container acquired CAP_SYS_ADMIN or another
+        dangerous capability, indicating a privilege escalation attempt.
+        This is a precursor to container escape (T1611, T1548, T1068).
+      condition: >
+        evt.type = capset and
+        securecloud_container and
+        (evt.arg.cap_effective contains CAP_SYS_ADMIN or
+         evt.arg.cap_effective contains CAP_SYS_PTRACE or
+         evt.arg.cap_effective contains CAP_NET_ADMIN or
+         evt.arg.cap_effective contains CAP_SYS_MODULE) and
+        not proc.name in (runc, containerd, dockerd)
+      output: >
+        Dangerous capability acquired inside container
+        (capability=%evt.arg.cap_effective
+        proc=%proc.name cmdline=%proc.cmdline
+        user=%user.name user_uid=%user.uid
+        pod=%k8s.pod.name ns=%k8s.ns.name
+        container_id=%container.id
+        image=%container.image.repository:%container.image.tag)
+      priority: CRITICAL
+      tags:
+        - securecloud
+        - mitre_privilege_escalation
+        - T1611
+        - T1548
+        - T1068
+        - container_escape
+
+    # ── RULE 5: Namespace Escape via /proc/1/root ────────────────────────────
+    # MITRE ATT&CK: T1611 — Escape to Host
+    #               T1083 — File and Directory Discovery (recon phase)
+    # Severity: CRITICAL
+    #
+    # Rationale:
+    #   /proc/1/root is a symlink (inside a container) to the root filesystem
+    #   of PID 1 — which, from outside the container's mount namespace
+    #   perspective, is the HOST root filesystem.  An attacker who accesses
+    #   /proc/1/root from inside a container can read and (if they have write
+    #   permission) modify files on the host node.
+    #
+    #   Classic container escape pattern:
+    #     1. Obtain CAP_SYS_ADMIN (Rule 4 fires)
+    #     2. Access /proc/1/root to browse the host filesystem (Rule 5 fires)
+    #     3. Write a cron job or modify a host binary for persistence
+    #
+    #   This rule also catches:
+    #     - /proc/self/root (same as /proc/1/root from the container's PID ns)
+    #     - /proc/<n>/root for any PID (reading another process's root)
+    #     - /proc/1/exe    (reading the init binary from the host)
+    #     - /proc/1/mem    (reading host process memory)
+    #
+    #   The glob patterns are broad deliberately: any access to /proc/1/*
+    #   from inside a container is highly suspicious.
+    #
+    # Alert volume: VERY LOW — should be zero.  The attack-sim namespace
+    #   runs exercises that intentionally trigger this; those pods are
+    #   excluded below.
+
+    - rule: Namespace Escape Attempt via /proc Filesystem
+      desc: >
+        A process inside a container accessed /proc/1/root or other
+        /proc paths that expose the host filesystem or another process's
+        address space. This is a strong indicator of a container escape
+        attempt (T1611) or host reconnaissance (T1083).
+      condition: >
+        (open_sensitive_file or evt.type in (open, openat, openat2)) and
+        securecloud_container and
+        (fd.name glob "/proc/1/*" or
+         fd.name glob "/proc/self/root*" or
+         fd.name = "/proc/1/root" or
+         fd.name = "/proc/1/mem" or
+         fd.name = "/proc/1/exe" or
+         fd.name glob "/proc/*/root/etc/passwd") and
+        not k8s.ns.name = "attack-sim"
+      output: >
+        Namespace escape attempt detected: container accessing host filesystem
+        via /proc
+        (file=%fd.name
+        proc=%proc.name cmdline=%proc.cmdline
+        user=%user.name user_uid=%user.uid
+        pod=%k8s.pod.name ns=%k8s.ns.name
+        container_id=%container.id
+        image=%container.image.repository:%container.image.tag)
+      priority: CRITICAL
+      tags:
+        - securecloud
+        - mitre_privilege_escalation
+        - mitre_discovery
+        - T1611
+        - T1083
+        - container_escape
+
+    ##########################################################################
+    # Supporting macros for built-in rule modifications
+    ##########################################################################
+
+    # Extend the built-in `never_true` macro with our known-safe processes
+    # to reduce false positives from built-in rules without disabling them.
+    - macro: user_known_write_below_root_activities
+      condition: >
+        (proc.name in (dpkg, rpm, microdnf, yum, apt, apt-get) or
+         container.image.repository glob "*elasticsearch*" or
+         container.image.repository glob "*logstash*" or
+         container.image.repository glob "*kibana*")

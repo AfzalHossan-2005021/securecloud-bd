@@ -1,0 +1,180 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# falco-sidekick-values.yaml
+#
+# Helm values for the falcosecurity/falcosidekick chart.
+# Chart: falcosecurity/falcosidekick
+# Version pinned in install-falco.sh (SIDEKICK_CHART_VERSION)
+#
+# Falco Sidekick is a fanout router: it receives every Falco alert over HTTP
+# on port 2801 and forwards them to one or more outputs simultaneously.
+# This avoids baking output destinations into Falco itself and lets us change
+# routing without restarting Falco.
+#
+# Data flow:
+#   Falco (http_output) ──→ Falco Sidekick :2801
+#                                 ├──→ Elasticsearch :9200  index: falco-alerts
+#                                 └──→ Slack webhook (placeholder)
+#
+# Outputs enabled here:
+#   1. Elasticsearch — index: falco-alerts-YYYY.MM.dd
+#      Feeds the SecureCloud-BD ELK SIEM dashboard.
+#      Kibana saved searches and alerts should query index pattern: falco-alerts-*
+#
+#   2. Webhook (Slack) — ${SLACK_WEBHOOK_URL}
+#      Delivers CRITICAL and ERROR alerts to a Slack channel in real time.
+#      Replace the placeholder before deploying in a real environment.
+#      To test without Slack: point the URL at a local http server (e.g. nc -l 3000).
+#
+# Adding more outputs (PagerDuty, Teams, Loki, etc.):
+#   Sidekick supports 60+ outputs. Full list:
+#   https://github.com/falcosecurity/falcosidekick#outputs
+#   Add a new section under config: below.
+# ──────────────────────────────────────────────────────────────────────────────
+
+# ── Replicas ──────────────────────────────────────────────────────────────────
+# Single replica for single-node Minikube; increase to 2 for HA in production.
+replicaCount: 1
+
+# ── Image ─────────────────────────────────────────────────────────────────────
+image:
+  repository: falcosecurity/falcosidekick
+  pullPolicy: IfNotPresent
+  # tag defaults to chart appVersion; uncomment to pin
+  # tag: "2.29.0"
+
+# ── Sidekick config ───────────────────────────────────────────────────────────
+config:
+
+  # ── Global settings ────────────────────────────────────────────────────────
+  # Minimum Falco priority level to forward to ALL outputs.
+  # Set to "debug" to receive everything; individual outputs can further
+  # filter by their own minimumpriority setting.
+  minimumpriority: "warning"
+
+  # Customfields: extra key-value pairs appended to every forwarded alert.
+  # Useful for tagging alerts with environment context in Kibana.
+  customfields:
+    environment: dev
+    cluster: securecloud-local
+    framework: securecloud-bd
+
+  # ── Output 1: Elasticsearch ────────────────────────────────────────────────
+  elasticsearch:
+    # Elasticsearch service name (Helm release: securecloud-es)
+    hostport: "http://securecloud-es-master:9200"
+
+    # Index name. Sidekick appends a date suffix automatically when
+    # suffix is set to "daily"; the resulting index is falco-alerts-YYYY.MM.dd
+    index: "falco-alerts"
+    suffix: "daily"
+
+    # No credentials — xpack.security is disabled in elasticsearch-values.yaml
+    username: ""
+    password: ""
+
+    # Forward all priority levels ≥ "warning" to Elasticsearch (no additional
+    # filtering; Kibana handles severity-based views via the priority field).
+    minimumpriority: "warning"
+
+    # Flat: true → store alert as a flat JSON document (easier for Kibana)
+    # Flat: false → nested structure with output_fields as a sub-object
+    # Recommendation: false (nested) for easier field mapping in ES 8.x
+    flat: false
+
+    # mutualtls, checkcert — leave false for the isolated dev cluster
+    mutualtls: false
+    checkcert: false
+
+    # Number of concurrent HTTP workers sending to ES
+    # Keep low on the single-node budget
+    numberofreplicas: 0     # ES setting: number_of_replicas for falco-alerts index
+    numberofshards: 1       # 1 primary shard — no replication on single node
+
+  # ── Output 2: Webhook (Slack) ──────────────────────────────────────────────
+  # Replace ${SLACK_WEBHOOK_URL} with a real Incoming Webhook URL from:
+  # https://api.slack.com/messaging/webhooks
+  #
+  # The webhook receives a JSON payload with fields:
+  #   text, rule, priority, output, output_fields, time, source, tags
+  #
+  # To deploy with a real URL:
+  #   helm upgrade falcosidekick falcosecurity/falcosidekick \
+  #     -n siem -f siem/falco/falco-sidekick-values.yaml \
+  #     --set config.webhook.address=${SLACK_WEBHOOK_URL}
+  #
+  # To test locally (listen on port 3000, print raw payloads):
+  #   kubectl run webhook-echo --image=mendhak/http-https-echo:latest -n siem
+  #   kubectl expose pod webhook-echo --port=3000 --name=webhook-echo -n siem
+  #   --set config.webhook.address=http://webhook-echo:3000/
+  webhook:
+    address: "${SLACK_WEBHOOK_URL}"
+    # Only alert on ERROR and above to Slack — WARNING would be too noisy
+    minimumpriority: "error"
+    # Custom message format (Go template); leave empty for Sidekick default
+    customsubjecttemplate: ""
+    # Forward as form-data (false) or JSON body (true)
+    checkcert: false
+    mutualtls: false
+
+  # ── Sidekick UI ────────────────────────────────────────────────────────────
+  # The UI is a lightweight dashboard showing recent alerts.
+  # Access it with: kubectl port-forward svc/falcosidekick-ui 2802:2802 -n siem
+  webui:
+    enabled: true
+    image:
+      repository: falcosecurity/falcosidekick-ui
+      pullPolicy: IfNotPresent
+    replicaCount: 1
+    redis:
+      storageclass: "standard"
+      size: "1Gi"
+      # Redis stores the last N alerts in memory for the UI timeline
+    resources:
+      requests:
+        cpu: "50m"
+        memory: "64Mi"
+      limits:
+        cpu: "100m"
+        memory: "128Mi"
+
+# ── Service ───────────────────────────────────────────────────────────────────
+service:
+  type: ClusterIP
+  port: 2801
+  annotations: {}
+
+# ── Resources ─────────────────────────────────────────────────────────────────
+resources:
+  requests:
+    cpu: "50m"
+    memory: "64Mi"
+  limits:
+    cpu: "200m"
+    memory: "128Mi"
+
+# ── Security context ──────────────────────────────────────────────────────────
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1234
+  fsGroup: 1234
+
+securityContext:
+  readOnlyRootFilesystem: true
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop:
+      - ALL
+
+# ── Tolerations ───────────────────────────────────────────────────────────────
+tolerations:
+  - key: node-role.kubernetes.io/control-plane
+    operator: Exists
+    effect: NoSchedule
+  - key: node-role.kubernetes.io/master
+    operator: Exists
+    effect: NoSchedule
+
+# ── Labels ────────────────────────────────────────────────────────────────────
+podLabels:
+  securecloud.io/component: falco-sidekick
+  securecloud.io/tier: siem
