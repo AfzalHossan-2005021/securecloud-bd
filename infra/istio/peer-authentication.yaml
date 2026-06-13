@@ -1,27 +1,193 @@
-# Enforce mTLS STRICT mode across all namespaces
+# ──────────────────────────────────────────────────────────────────────────────
+# peer-authentication.yaml
+#
+# PeerAuthentication resources enforce mTLS policy on the SERVER side of every
+# connection.  These resources tell the Envoy sidecar on the RECEIVING pod what
+# it must demand from the caller.
+#
+# Mode reference:
+#   PERMISSIVE  Accept both plain-text and mTLS.  Used temporarily during
+#               migration to let non-sidecar pods still communicate.  Never
+#               leave this in place permanently — it defeats the purpose.
+#
+#   STRICT      Reject any connection that does not present a valid SPIFFE
+#               certificate issued by Istio's CA (istiod).  This is the target
+#               state.  A plain-text connection from a pod without a sidecar
+#               will receive a TLS handshake failure and the connection is
+#               dropped before any data is exchanged.
+#
+# Namespace-scoped "default" policy:
+#   A PeerAuthentication named "default" in a namespace applies to ALL pods
+#   in that namespace unless a more specific policy (scoped by podSelector)
+#   overrides it.  The mesh-wide default can also be set in the istio-system
+#   namespace; the namespace-scoped policy here is intentionally redundant
+#   with that to make the security posture explicit and auditable per namespace.
+#
+# SPIFFE identity:
+#   Each Envoy sidecar receives a SPIFFE Verifiable Identity Document (SVID)
+#   of the form:
+#     spiffe://<trust-domain>/ns/<namespace>/sa/<service-account>
+#   In STRICT mode, the server sidecar validates that the caller's certificate
+#   chains to the cluster trust anchor and that the identity matches an
+#   AuthorizationPolicy (if one is present).
+#
+# Namespaces covered:
+#   apps         bKash demo application (frontend, payment-api, user-db)
+#   ml-engine    ML inference workloads
+#   monitoring   Prometheus, Grafana, Alertmanager
+#   securecloud  Threat-scoring API (primary research workload)
+#   siem         ELK stack, Filebeat, Falco
+#   ml           ML training namespace (legacy name kept for compatibility)
+# ──────────────────────────────────────────────────────────────────────────────
+
+# ── Mesh-wide default in istio-system ────────────────────────────────────────
+# A PeerAuthentication in the istio-system namespace with an empty podSelector
+# becomes the mesh-wide baseline.  All namespaces inherit this unless they
+# define their own namespace-scoped policy.  Namespace-scoped policies below
+# are explicit redundancy — if the mesh default is accidentally changed, the
+# per-namespace policies still enforce STRICT.
+apiVersion: security.istio.io/v1beta1
+kind: PeerAuthentication
+metadata:
+  name: mesh-default
+  namespace: istio-system
+  annotations:
+    securecloud.io/policy-tier: "mesh-baseline"
+    securecloud.io/rationale: >
+      Establishes STRICT mTLS as the mesh-wide default.
+      Every namespace without its own PeerAuthentication inherits this.
+spec:
+  mtls:
+    mode: STRICT
+
+---
+# ── apps namespace ────────────────────────────────────────────────────────────
+# Covers: frontend (Flask), payment-api (FastAPI), user-db (PostgreSQL).
+# All three pods must have Envoy sidecars injected (namespace label
+# istio-injection=enabled) for STRICT to take effect.  A pod without a sidecar
+# cannot participate in mTLS and its connections will be rejected by peers.
+apiVersion: security.istio.io/v1beta1
+kind: PeerAuthentication
+metadata:
+  name: default
+  namespace: apps
+  annotations:
+    securecloud.io/policy-tier: "namespace"
+    securecloud.io/rationale: >
+      STRICT mTLS for the bKash demo application tier.
+      Prevents any pod without an Istio SVID from reaching the payment-api
+      or user-db, even if NetworkPolicies are misconfigured.
+spec:
+  # Empty selector → applies to every pod in the namespace.
+  # Port-level overrides can be added here if a specific port (e.g. metrics)
+  # needs to remain plain-text for a legacy scraper:
+  #   portLevelMtls:
+  #     9090:
+  #       mode: PERMISSIVE
+  selector: {}
+  mtls:
+    mode: STRICT
+
+---
+# ── ml-engine namespace ───────────────────────────────────────────────────────
+# Covers: ML inference service, model-serving pods.
+# The threat-scoring API calls into this namespace; both sides must present
+# valid SVIDs so that a compromised pod in apps cannot impersonate the
+# legitimate inference client.
+apiVersion: security.istio.io/v1beta1
+kind: PeerAuthentication
+metadata:
+  name: default
+  namespace: ml-engine
+  annotations:
+    securecloud.io/policy-tier: "namespace"
+    securecloud.io/rationale: >
+      STRICT mTLS for ML inference workloads.
+      Model weights are sensitive IP; mTLS ensures only authenticated callers
+      can trigger inference.
+spec:
+  selector: {}
+  mtls:
+    mode: STRICT
+
+---
+# ── monitoring namespace ──────────────────────────────────────────────────────
+# Covers: Prometheus, Grafana, Alertmanager.
+# Even though monitoring is often treated as "internal only", a compromised
+# Prometheus scraper with plaintext access to all pods is a significant
+# lateral-movement risk.  STRICT mTLS limits blast radius.
+apiVersion: security.istio.io/v1beta1
+kind: PeerAuthentication
+metadata:
+  name: default
+  namespace: monitoring
+  annotations:
+    securecloud.io/policy-tier: "namespace"
+    securecloud.io/rationale: >
+      STRICT mTLS for observability stack.
+      Prevents a rogue pod from impersonating Prometheus to scrape sensitive
+      /metrics endpoints that may expose internal state.
+spec:
+  selector: {}
+  mtls:
+    mode: STRICT
+
+---
+# ── securecloud namespace ─────────────────────────────────────────────────────
+# Covers: threat-api (FastAPI scoring service) — the primary research workload.
 apiVersion: security.istio.io/v1beta1
 kind: PeerAuthentication
 metadata:
   name: default
   namespace: securecloud
+  annotations:
+    securecloud.io/policy-tier: "namespace"
+    securecloud.io/rationale: >
+      STRICT mTLS for the threat-scoring API.
+      This service receives raw network flow data; identity verification of
+      callers is essential to prevent data poisoning attacks.
 spec:
+  selector: {}
   mtls:
     mode: STRICT
+
 ---
+# ── siem namespace ────────────────────────────────────────────────────────────
+# Covers: Elasticsearch, Logstash, Kibana, Filebeat.
+# The SIEM receives security-critical log data.  An attacker who can inject
+# false log entries could blind the detection pipeline.  mTLS ensures log
+# sources are authenticated.
 apiVersion: security.istio.io/v1beta1
 kind: PeerAuthentication
 metadata:
   name: default
   namespace: siem
+  annotations:
+    securecloud.io/policy-tier: "namespace"
+    securecloud.io/rationale: >
+      STRICT mTLS for ELK SIEM.
+      Unauthenticated log ingestion would allow an attacker to forge alerts
+      or flood Elasticsearch with garbage to obscure real detections.
 spec:
+  selector: {}
   mtls:
     mode: STRICT
+
 ---
+# ── ml namespace (legacy alias) ───────────────────────────────────────────────
+# Kept for backward compatibility with earlier manifests that used "ml" instead
+# of "ml-engine".  Both namespaces are active during the transition period.
 apiVersion: security.istio.io/v1beta1
 kind: PeerAuthentication
 metadata:
   name: default
   namespace: ml
+  annotations:
+    securecloud.io/policy-tier: "namespace"
+    securecloud.io/rationale: >
+      STRICT mTLS for legacy ml namespace.
+      Kept during namespace rename transition from ml → ml-engine.
 spec:
+  selector: {}
   mtls:
     mode: STRICT

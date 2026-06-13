@@ -1,30 +1,297 @@
-apiVersion: networking.istio.io/v1alpha3
+# ──────────────────────────────────────────────────────────────────────────────
+# destination-rules.yaml
+#
+# DestinationRule resources enforce mTLS policy on the CLIENT side of every
+# connection.  Where PeerAuthentication tells a pod what to ACCEPT, a
+# DestinationRule tells a pod's sidecar how to SEND traffic.
+#
+# Why both are required:
+#   PeerAuthentication alone can cause 503s during mixed-sidecar rollouts.
+#   If the server is in STRICT mode but the client sidecar has no DestinationRule,
+#   it may send a plain-text connection (Envoy's default when no rule exists is
+#   to pass traffic through without TLS, relying on the mesh to upgrade it).
+#   The DestinationRule with ISTIO_MUTUAL closes the client side, ensuring the
+#   sidecar always initiates a mutually-authenticated TLS handshake.
+#
+# TLS mode options:
+#   DISABLE        Never use TLS (plain text only).
+#   SIMPLE         One-way TLS (client verifies server certificate, like HTTPS).
+#   MUTUAL         Bring-your-own certificates for mutual TLS.
+#   ISTIO_MUTUAL   Use certificates managed by Istio's CA.  Both sides present
+#                  Istio-issued SVIDs.  This is the correct choice when both
+#                  pods have Envoy sidecars.
+#
+# Host field — wildcard vs specific:
+#   A wildcard host (*.namespace.svc.cluster.local) applies to ALL services in
+#   the namespace.  This is appropriate here because every service in each
+#   namespace has a sidecar.  If a service needs a different TLS mode (e.g. a
+#   legacy database without sidecar), add a specific DestinationRule for that
+#   host with DISABLE, which will override the wildcard.
+#
+# Load balancing:
+#   LEAST_CONN is set for the stateful services (payment-api, user-db) to
+#   distribute connections more evenly across pods than the default ROUND_ROBIN,
+#   which can be uneven for long-lived TCP connections (e.g. DB connection pools).
+# ──────────────────────────────────────────────────────────────────────────────
+
+# ── apps namespace ────────────────────────────────────────────────────────────
+
+# Frontend → Payment API
+apiVersion: networking.istio.io/v1beta1
 kind: DestinationRule
 metadata:
-  name: securecloud-mtls
+  name: frontend-mtls
+  namespace: apps
+  annotations:
+    securecloud.io/flow: "frontend → (all services in apps)"
+    securecloud.io/rationale: >
+      Forces the frontend Envoy sidecar to present its SVID when calling any
+      service in the apps namespace.  Without this, the sidecar might attempt
+      a plain-text connection and be rejected by the STRICT PeerAuthentication
+      on the receiving pod.
+spec:
+  host: "frontend.apps.svc.cluster.local"
+  trafficPolicy:
+    tls:
+      mode: ISTIO_MUTUAL
+    connectionPool:
+      tcp:
+        maxConnections: 50
+      http:
+        http1MaxPendingRequests: 20
+        http2MaxRequests: 100
+
+---
+# Payment API — receives from frontend, connects to user-db
+apiVersion: networking.istio.io/v1beta1
+kind: DestinationRule
+metadata:
+  name: payment-api-mtls
+  namespace: apps
+  annotations:
+    securecloud.io/flow: "* → payment-api"
+    securecloud.io/rationale: >
+      Ensures any caller targeting payment-api uses ISTIO_MUTUAL.
+      LEAST_CONN distributes load evenly across the two replicas for
+      the long-lived psycopg2 connection pools held by each FastAPI worker.
+spec:
+  host: "payment-api.apps.svc.cluster.local"
+  trafficPolicy:
+    tls:
+      mode: ISTIO_MUTUAL
+    loadBalancer:
+      simple: LEAST_CONN
+    connectionPool:
+      tcp:
+        maxConnections: 100
+        connectTimeout: 5s
+      http:
+        http1MaxPendingRequests: 50
+        http2MaxRequests: 200
+        idleTimeout: 90s
+    # Circuit breaker: stop sending to an unhealthy replica
+    outlierDetection:
+      consecutiveGatewayErrors: 5
+      interval: 30s
+      baseEjectionTime: 30s
+      maxEjectionPercent: 50
+
+---
+# User DB (PostgreSQL) — TCP service, not HTTP; mTLS still applies at L4
+apiVersion: networking.istio.io/v1beta1
+kind: DestinationRule
+metadata:
+  name: user-db-mtls
+  namespace: apps
+  annotations:
+    securecloud.io/flow: "payment-api → user-db"
+    securecloud.io/rationale: >
+      PostgreSQL speaks raw TCP, not HTTP, but Envoy tunnels it through mTLS
+      at the transport layer.  ISTIO_MUTUAL here means the payment-api sidecar
+      wraps the PostgreSQL wire protocol inside a mutually-authenticated TLS
+      session before it leaves the pod.  The user-db sidecar unwraps it.
+      The PostgreSQL server process itself sees plain TCP on localhost.
+spec:
+  host: "user-db.apps.svc.cluster.local"
+  trafficPolicy:
+    tls:
+      mode: ISTIO_MUTUAL
+    loadBalancer:
+      simple: LEAST_CONN
+    connectionPool:
+      tcp:
+        maxConnections: 20      # match payment-api's psycopg2 pool size
+        connectTimeout: 5s
+        tcpKeepalive:
+          time: 300s
+          interval: 75s
+
+---
+# Catch-all wildcard for any other service added to the apps namespace later
+apiVersion: networking.istio.io/v1beta1
+kind: DestinationRule
+metadata:
+  name: apps-namespace-mtls
+  namespace: apps
+  annotations:
+    securecloud.io/rationale: >
+      Wildcard fallback — any service not covered by a specific DestinationRule
+      above still gets ISTIO_MUTUAL enforced.  Specific rules above take
+      precedence over this wildcard.
+spec:
+  host: "*.apps.svc.cluster.local"
+  trafficPolicy:
+    tls:
+      mode: ISTIO_MUTUAL
+
+---
+# ── ml-engine namespace ───────────────────────────────────────────────────────
+apiVersion: networking.istio.io/v1beta1
+kind: DestinationRule
+metadata:
+  name: ml-engine-mtls
+  namespace: ml-engine
+  annotations:
+    securecloud.io/rationale: >
+      All ML inference services use ISTIO_MUTUAL.  LEAST_CONN is appropriate
+      because inference requests vary widely in latency (small vs large batches)
+      and round-robin can pile requests on a slow replica.
+spec:
+  host: "*.ml-engine.svc.cluster.local"
+  trafficPolicy:
+    tls:
+      mode: ISTIO_MUTUAL
+    loadBalancer:
+      simple: LEAST_CONN
+    connectionPool:
+      http:
+        http1MaxPendingRequests: 10
+        http2MaxRequests: 50
+        idleTimeout: 120s
+
+---
+# ── monitoring namespace ──────────────────────────────────────────────────────
+apiVersion: networking.istio.io/v1beta1
+kind: DestinationRule
+metadata:
+  name: monitoring-mtls
+  namespace: monitoring
+  annotations:
+    securecloud.io/rationale: >
+      Prometheus scrape connections and Grafana → Prometheus API calls all use
+      ISTIO_MUTUAL.  Without this, Grafana might send plain-text queries even
+      though Prometheus's sidecar requires mTLS.
+spec:
+  host: "*.monitoring.svc.cluster.local"
+  trafficPolicy:
+    tls:
+      mode: ISTIO_MUTUAL
+    connectionPool:
+      http:
+        http1MaxPendingRequests: 20
+        idleTimeout: 300s   # Prometheus uses long-lived connections for scraping
+
+---
+# ── securecloud namespace ─────────────────────────────────────────────────────
+apiVersion: networking.istio.io/v1beta1
+kind: DestinationRule
+metadata:
+  name: threat-api-mtls
   namespace: securecloud
+  annotations:
+    securecloud.io/flow: "* → threat-api"
+    securecloud.io/rationale: >
+      The threat-scoring API handles sensitive flow data.  Specific connection
+      pool limits prevent a misbehaving caller from exhausting the API's
+      worker threads through connection flooding.
+spec:
+  host: "threat-api.securecloud.svc.cluster.local"
+  trafficPolicy:
+    tls:
+      mode: ISTIO_MUTUAL
+    loadBalancer:
+      simple: LEAST_CONN
+    connectionPool:
+      tcp:
+        maxConnections: 50
+      http:
+        http1MaxPendingRequests: 30
+        http2MaxRequests: 100
+    outlierDetection:
+      consecutiveGatewayErrors: 3
+      interval: 20s
+      baseEjectionTime: 60s
+
+---
+apiVersion: networking.istio.io/v1beta1
+kind: DestinationRule
+metadata:
+  name: securecloud-namespace-mtls
+  namespace: securecloud
+  annotations:
+    securecloud.io/rationale: "Wildcard fallback for any future service in securecloud namespace."
 spec:
   host: "*.securecloud.svc.cluster.local"
   trafficPolicy:
     tls:
       mode: ISTIO_MUTUAL
+
 ---
-apiVersion: networking.istio.io/v1alpha3
+# ── siem namespace ────────────────────────────────────────────────────────────
+apiVersion: networking.istio.io/v1beta1
 kind: DestinationRule
 metadata:
-  name: siem-mtls
+  name: elasticsearch-mtls
   namespace: siem
+  annotations:
+    securecloud.io/flow: "logstash/filebeat → elasticsearch"
+    securecloud.io/rationale: >
+      Elasticsearch stores raw security logs and anomaly scores — among the
+      most sensitive data in the cluster.  TCP keepalive ensures that
+      long-lived Logstash bulk-indexing connections are not silently dropped
+      by the NAT layer inside Minikube.
+spec:
+  host: "elasticsearch.siem.svc.cluster.local"
+  trafficPolicy:
+    tls:
+      mode: ISTIO_MUTUAL
+    loadBalancer:
+      simple: LEAST_CONN
+    connectionPool:
+      tcp:
+        maxConnections: 30
+        connectTimeout: 10s
+        tcpKeepalive:
+          time: 300s
+          interval: 75s
+      http:
+        http1MaxPendingRequests: 50
+        http2MaxRequests: 200
+        idleTimeout: 120s
+
+---
+apiVersion: networking.istio.io/v1beta1
+kind: DestinationRule
+metadata:
+  name: siem-namespace-mtls
+  namespace: siem
+  annotations:
+    securecloud.io/rationale: "Wildcard fallback for Logstash, Kibana, Filebeat in siem namespace."
 spec:
   host: "*.siem.svc.cluster.local"
   trafficPolicy:
     tls:
       mode: ISTIO_MUTUAL
+
 ---
-apiVersion: networking.istio.io/v1alpha3
+# ── ml namespace (legacy) ─────────────────────────────────────────────────────
+apiVersion: networking.istio.io/v1beta1
 kind: DestinationRule
 metadata:
-  name: ml-mtls
+  name: ml-namespace-mtls
   namespace: ml
+  annotations:
+    securecloud.io/rationale: "Legacy ml namespace — kept during rename transition to ml-engine."
 spec:
   host: "*.ml.svc.cluster.local"
   trafficPolicy:
