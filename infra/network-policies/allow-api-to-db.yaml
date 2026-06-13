@@ -1,0 +1,103 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# allow-api-to-db.yaml
+#
+# NIST SP 800-207 §2.4 — Dynamic Policy:
+#   "Authentication and authorization to individual enterprise resources is
+#    dynamic and strictly enforced before access is allowed."
+#
+# NIST SP 800-207 §3.3 — Workload Isolation:
+#   "The enterprise's goal is to prevent unauthorized connections to resources
+#    and to make access control enforcement as granular as possible."
+#
+# The database is the most sensitive resource in the stack.  This policy
+# confines PostgreSQL access to a single identified workload (payment-api)
+# on a single port (5432).  No other pod — including the frontend — may
+# reach user-db, even though they share the same namespace.
+#
+# Flow permitted:
+#   payment-api pod (app=payment-api)  →  user-db pod (app=user-db)  : TCP 5432
+#
+# Why the frontend MUST NOT reach the database:
+#   Defence-in-depth requires that a compromised frontend cannot directly
+#   exfiltrate data via SQL.  All data access is mediated by the API layer,
+#   which enforces business logic (balance checks, transaction atomicity).
+#   Blocking the frontend→DB path at the network layer ensures that even if
+#   the application-level access control is bypassed, the network will reject
+#   the connection attempt.
+#
+# StatefulSet pod label note:
+#   The user-db StatefulSet's pod template sets app=user-db.  This label is
+#   applied to all pods in the set (user-db-0), so the selector here matches
+#   regardless of ordinal suffix.
+#
+# Egress note for payment-api:
+#   The egress rule below permits only connections to pods labelled app=user-db
+#   on port 5432.  The payment-api cannot reach any other pod via this rule;
+#   it still benefits from allow-egress-dns.yaml for name resolution.
+# ──────────────────────────────────────────────────────────────────────────────
+
+# ── Policy A: egress FROM payment-api ────────────────────────────────────────
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-payment-api-egress-to-db
+  namespace: apps
+  annotations:
+    nist-sp-800-207: "Section 2.4 — Dynamic policy; workload-scoped egress to data tier"
+    securecloud.io/policy-tier: "workload"
+    securecloud.io/flow: "payment-api → user-db:5432"
+spec:
+  # Applies only to pods labelled app=payment-api.
+  podSelector:
+    matchLabels:
+      app: payment-api
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        # AND-combination: namespace 'apps' AND pod label app=user-db.
+        # This is a single list entry; two entries would be OR-combined,
+        # inadvertently permitting traffic to any pod in 'apps' or any
+        # pod labelled app=user-db in any namespace.
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: apps
+          podSelector:
+            matchLabels:
+              app: user-db
+      ports:
+        - protocol: TCP
+          port: 5432
+
+---
+# ── Policy B: ingress TO user-db ─────────────────────────────────────────────
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-db-ingress-from-payment-api
+  namespace: apps
+  annotations:
+    nist-sp-800-207: "Section 2.4 — Dynamic policy; restrict database ingress to API tier only"
+    securecloud.io/policy-tier: "workload"
+    securecloud.io/flow: "payment-api → user-db:5432"
+spec:
+  # Applies only to pods labelled app=user-db (the PostgreSQL StatefulSet).
+  podSelector:
+    matchLabels:
+      app: user-db
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        # Only payment-api pods in the apps namespace may open a TCP connection
+        # to port 5432.  The frontend (app=frontend) is not listed and therefore
+        # its connection attempts will be silently dropped.
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: apps
+          podSelector:
+            matchLabels:
+              app: payment-api
+      ports:
+        - protocol: TCP
+          port: 5432

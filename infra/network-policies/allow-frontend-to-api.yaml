@@ -1,0 +1,108 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# allow-frontend-to-api.yaml
+#
+# NIST SP 800-207 §2.3 — Least Privilege Access:
+#   "Access to individual enterprise resources is granted on a per-session basis.
+#    Trust in the requester is evaluated before access is granted."
+#
+# NIST SP 800-207 §3.3 — Micro-segmentation:
+#   "The enterprise monitors and measures the integrity and security posture of
+#    all owned and associated assets.  No asset is inherently trusted."
+#
+# This policy implements a directed, port-scoped channel between exactly two
+# workloads.  Neither the frontend nor the API can be reached by any other pod
+# through this rule; all other traffic remains blocked by default-deny-all.
+#
+# Flow permitted:
+#   frontend pod (app=frontend)  →  payment-api pod (app=payment-api)  : TCP 8000
+#
+# TWO policies are required to model one logical flow because Kubernetes
+# NetworkPolicy is additive and directional:
+#
+#   Policy A (egress on frontend):
+#     Permits the frontend pod to SEND traffic to payment-api:8000.
+#     Without this, the kernel drops the SYN in the egress path.
+#
+#   Policy B (ingress on payment-api):
+#     Permits payment-api to RECEIVE traffic from the frontend pod.
+#     Without this, the kernel drops the SYN in the ingress path of the
+#     receiving pod — even if the sender was allowed to send it.
+#
+# Selector logic:
+#   podSelector with matchLabels: {app: frontend} targets only pods that carry
+#   exactly that label — i.e., the Flask deployment.  The label is set in
+#   frontend-deployment.yaml.  Any future pod added to the namespace without
+#   this label is unaffected and remains fully denied.
+#
+#   The egress namespaceSelector is explicitly scoped to the "apps" namespace
+#   via its label (kubernetes.io/metadata.name is auto-applied by Kubernetes
+#   ≥1.21 to every namespace).  This prevents the rule from accidentally
+#   permitting connections to a pod named "payment-api" in a different namespace
+#   if label hygiene slips.
+# ──────────────────────────────────────────────────────────────────────────────
+
+# ── Policy A: egress FROM frontend ───────────────────────────────────────────
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-frontend-egress-to-payment-api
+  namespace: apps
+  annotations:
+    nist-sp-800-207: "Section 2.3 — Least privilege; explicit per-flow egress grant"
+    securecloud.io/policy-tier: "workload"
+    securecloud.io/flow: "frontend → payment-api:8000"
+spec:
+  # Applies only to pods labelled app=frontend (the Flask deployment).
+  podSelector:
+    matchLabels:
+      app: frontend
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        # Constrain destination namespace to 'apps' by its immutable metadata label.
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: apps
+          # AND within that namespace, only pods labelled app=payment-api.
+          # namespaceSelector AND podSelector are ANDed when written as a single
+          # list element (not two separate elements); two separate elements would
+          # be ORed — a common misconfiguration that over-permits traffic.
+          podSelector:
+            matchLabels:
+              app: payment-api
+      ports:
+        - protocol: TCP
+          port: 8000
+
+---
+# ── Policy B: ingress TO payment-api ─────────────────────────────────────────
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-payment-api-ingress-from-frontend
+  namespace: apps
+  annotations:
+    nist-sp-800-207: "Section 2.3 — Least privilege; explicit per-flow ingress grant"
+    securecloud.io/policy-tier: "workload"
+    securecloud.io/flow: "frontend → payment-api:8000"
+spec:
+  # Applies only to pods labelled app=payment-api (the FastAPI deployment).
+  podSelector:
+    matchLabels:
+      app: payment-api
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        # Accept connections only from within the 'apps' namespace AND from
+        # pods that carry the app=frontend label.
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: apps
+          podSelector:
+            matchLabels:
+              app: frontend
+      ports:
+        - protocol: TCP
+          port: 8000

@@ -1,0 +1,84 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# default-deny-all.yaml
+#
+# NIST SP 800-207 §2.2 — Zero Trust Principle:
+#   "All communication is secured regardless of network location.
+#    Assume that the internal network is always hostile."
+#
+# This manifest implements the foundational zero-trust control: every pod in
+# the target namespaces starts with ZERO permitted traffic, in both directions.
+# All allowed flows must be explicitly added by a separate, specific policy.
+#
+# Why both ingress AND egress?
+#   A compromised pod must not be able to initiate outbound connections even if
+#   nobody can reach it inbound.  Egress default-deny is the control that stops
+#   a pod from phoning home to a C2 server or exfiltrating data to an external
+#   IP after exploitation.  Ingress-only default-deny is insufficient.
+#
+# Selector logic:
+#   podSelector: {}  — empty selector matches EVERY pod in the namespace.
+#   policyTypes includes both Ingress and Egress so that the policy is
+#   treated as the baseline for both directions.  A policy that lists
+#   policyTypes: [Ingress] without any ingress rules blocks all inbound;
+#   adding Egress without rules blocks all outbound.  An empty rules list
+#   is explicitly more restrictive than no rules list.
+#
+# Namespaces covered: apps, ml-engine, monitoring
+# (Apply this file to each namespace; the namespace field in metadata targets
+#  the specific namespace but the same YAML content is replicated so that
+#  a single `kubectl apply -f` on this file handles all three.)
+# ──────────────────────────────────────────────────────────────────────────────
+
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+  namespace: apps
+  annotations:
+    nist-sp-800-207: "Section 2.2 — All data sources and computing services are resources; access is granted per-session with least privilege"
+    securecloud.io/policy-tier: "baseline"
+spec:
+  # Matches every pod in the namespace — no label filter applied.
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress
+  # Intentionally empty ingress and egress rule lists.
+  # An empty list means "no traffic is permitted" for that direction.
+  # Do NOT add a wildcard rule here; add specific allow policies instead.
+  ingress: []
+  egress: []
+
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+  namespace: ml-engine
+  annotations:
+    nist-sp-800-207: "Section 2.2 — All data sources and computing services are resources; access is granted per-session with least privilege"
+    securecloud.io/policy-tier: "baseline"
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress: []
+  egress: []
+
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+  namespace: monitoring
+  annotations:
+    nist-sp-800-207: "Section 2.2 — All data sources and computing services are resources; access is granted per-session with least privilege"
+    securecloud.io/policy-tier: "baseline"
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress: []
+  egress: []

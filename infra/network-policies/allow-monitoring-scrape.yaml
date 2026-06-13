@@ -1,0 +1,112 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# allow-monitoring-scrape.yaml
+#
+# NIST SP 800-207 §2.6 — Continuous Monitoring:
+#   "The enterprise collects as much information as possible about the current
+#    state of assets, network infrastructure and communications and uses it to
+#    improve its security posture."
+#
+# Observability is a security control, not just an operational nicety.
+# Prometheus scraping provides the telemetry that feeds anomaly detection and
+# the SIEM pipeline.  However, permitting the monitoring namespace unrestricted
+# access to app pods would be a significant over-permission.
+#
+# This policy scopes the monitoring namespace's reach to a single port (9090,
+# the Prometheus metrics port) and restricts it to pods that explicitly expose
+# that port.  Pods that do not carry the metrics=enabled label are unreachable.
+#
+# Design choice — metrics port 9090:
+#   Prometheus instrumentation libraries (prometheus-fastapi-instrumentator,
+#   flask-prometheus-metrics) typically expose /metrics on the application's
+#   main port.  To keep this policy compatible with a wide range of workloads,
+#   apps may either expose metrics on port 9090 as a dedicated endpoint OR
+#   on their primary port.  Add a second ports entry if needed.
+#
+# Flow permitted:
+#   monitoring namespace (app=prometheus)  →  apps namespace (metrics=enabled)  : TCP 9090
+#   monitoring namespace (app=prometheus)  →  apps namespace (metrics=enabled)  : TCP 8000
+#     (secondary entry covers the FastAPI /metrics endpoint on the app port)
+#
+# Egress from monitoring:
+#   The monitoring pods also need to SEND the scrape request.  The egress rule
+#   here grants them outbound access to apps-namespace pods only on the metrics
+#   ports.  Monitoring cannot reach the DB or any other port via this rule.
+# ──────────────────────────────────────────────────────────────────────────────
+
+# ── Policy A: egress FROM monitoring namespace pods ───────────────────────────
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-monitoring-egress-scrape
+  namespace: monitoring
+  annotations:
+    nist-sp-800-207: "Section 2.6 — Continuous monitoring; scoped egress for metrics collection"
+    securecloud.io/policy-tier: "observability"
+    securecloud.io/flow: "monitoring:prometheus → apps:metrics-port"
+spec:
+  # Applies only to the Prometheus server pod(s) in the monitoring namespace.
+  # Other monitoring workloads (e.g. Alertmanager) are not granted scrape access.
+  podSelector:
+    matchLabels:
+      app: prometheus
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        # Cross-namespace egress: only the apps namespace, only labelled pods.
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: apps
+          podSelector:
+            matchLabels:
+              # Workloads must opt in to scraping by carrying this label.
+              # Add `metrics: "enabled"` to a deployment's pod template to
+              # make it discoverable.
+              metrics: "enabled"
+      ports:
+        - protocol: TCP
+          port: 9090    # dedicated Prometheus metrics port
+        - protocol: TCP
+          port: 8000    # FastAPI /metrics on primary app port
+        - protocol: TCP
+          port: 5000    # Flask /metrics on primary app port
+
+---
+# ── Policy B: ingress TO app pods from monitoring ─────────────────────────────
+# Applied in the 'apps' namespace — allows only the monitoring namespace in.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-metrics-ingress-from-monitoring
+  namespace: apps
+  annotations:
+    nist-sp-800-207: "Section 2.6 — Continuous monitoring; scoped ingress for metrics collection"
+    securecloud.io/policy-tier: "observability"
+    securecloud.io/flow: "monitoring:prometheus → apps:metrics-port"
+spec:
+  # Applies only to app pods that have opted into scraping.
+  # This is a separate label from 'app' so that the policy can be applied
+  # surgically without touching the default-deny baseline.
+  podSelector:
+    matchLabels:
+      metrics: "enabled"
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        # Accept only from the monitoring namespace AND only from the Prometheus pod.
+        # If Prometheus is not labelled app=prometheus in your deployment, update
+        # the podSelector or remove it to allow any pod from monitoring namespace.
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+          podSelector:
+            matchLabels:
+              app: prometheus
+      ports:
+        - protocol: TCP
+          port: 9090
+        - protocol: TCP
+          port: 8000
+        - protocol: TCP
+          port: 5000

@@ -1,0 +1,121 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# allow-egress-dns.yaml
+#
+# NIST SP 800-207 §2.1 — All Communication Must Be Authenticated:
+#   "All communication is secured regardless of network location."
+#
+# DNS is the single necessary exception to a pure default-deny egress posture.
+# Without it, every pod that tries to resolve a service name (e.g.
+# payment-api.apps.svc.cluster.local) will hang or fail, breaking service
+# discovery entirely.
+#
+# This policy permits only the minimum required:
+#   - Destination: the kube-dns pods in kube-system, identified by their
+#     standard label (k8s-app=kube-dns).
+#   - Port: UDP 53 (DNS queries) AND TCP 53 (DNS-over-TCP for responses > 512 B,
+#     required by some record types and DNSSEC).
+#   - Scope: all pods in the target namespace (podSelector: {}).
+#
+# Why namespaceSelector AND podSelector together?
+#   Without the podSelector, any pod in kube-system could be reached on port 53.
+#   The kube-system namespace contains etcd, the API server, and other
+#   privileged components.  The combined selector tightly constrains the
+#   destination to only the CoreDNS pods.
+#
+# Why not use a static IP (clusterIP of kube-dns service)?
+#   The kube-dns Service ClusterIP is stable but hardcoding it breaks portability
+#   across clusters.  Label-based selection is cluster-agnostic and survives
+#   recreation of the Service.  An ipBlock-based rule would also not survive
+#   cluster recreation.
+#
+# Namespaces covered: apps, ml-engine, monitoring
+# Each namespace gets its own policy object because a NetworkPolicy is
+# namespace-scoped and cannot span namespaces from its own spec.
+# ──────────────────────────────────────────────────────────────────────────────
+
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-egress-dns
+  namespace: apps
+  annotations:
+    nist-sp-800-207: "Section 2.1 — All communication authenticated; DNS minimum required for service discovery"
+    securecloud.io/policy-tier: "infrastructure"
+    securecloud.io/flow: "all-pods → kube-dns:53"
+spec:
+  # Applies to every pod in the namespace — DNS is universally needed.
+  podSelector: {}
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        # Targets only the CoreDNS pods inside kube-system.
+        # The label k8s-app=kube-dns is applied by kubeadm, k3s, and
+        # minikube to the CoreDNS DaemonSet/Deployment pods.
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53    # Standard DNS query/response
+        - protocol: TCP
+          port: 53    # DNS-over-TCP (large responses, zone transfers)
+
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-egress-dns
+  namespace: ml-engine
+  annotations:
+    nist-sp-800-207: "Section 2.1 — DNS minimum required for service discovery"
+    securecloud.io/policy-tier: "infrastructure"
+    securecloud.io/flow: "all-pods → kube-dns:53"
+spec:
+  podSelector: {}
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-egress-dns
+  namespace: monitoring
+  annotations:
+    nist-sp-800-207: "Section 2.1 — DNS minimum required for service discovery"
+    securecloud.io/policy-tier: "infrastructure"
+    securecloud.io/flow: "all-pods → kube-dns:53"
+spec:
+  podSelector: {}
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
