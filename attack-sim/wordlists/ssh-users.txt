@@ -1,0 +1,10 @@
+root
+admin
+ubuntu
+ec2-user
+user
+testuser
+pentest
+securecloud
+deploy
+svc

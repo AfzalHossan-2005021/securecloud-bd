@@ -1,0 +1,116 @@
+# =============================================================================
+# ssh-test-pod.yaml — Intentionally vulnerable SSH target for scenario 03
+#
+# ⚠  TEST ONLY — DELETE IMMEDIATELY after scenario 03 completes.
+#    This pod has weak credentials and an exposed NodePort by design.
+#    It MUST NOT be left running in any shared or production environment.
+#
+# Deploy:   kubectl apply -f attack-sim/manifests/ssh-test-pod.yaml
+# Destroy:  kubectl delete -f attack-sim/manifests/ssh-test-pod.yaml
+# =============================================================================
+---
+# Namespace: uses the securecloud namespace so Falco / NetworkPolicy apply
+apiVersion: v1
+kind: Pod
+metadata:
+  name: ssh-test
+  namespace: securecloud
+  labels:
+    app: ssh-test
+    role: pentest-target
+    securecloud.io/test-only: "true"
+  annotations:
+    securecloud.io/purpose: "Attack simulation target — SSH brute-force scenario 03"
+    securecloud.io/delete-after: "30 minutes"
+spec:
+  # Prefer scheduling on a non-critical node (Minikube only has one, so this is advisory)
+  tolerations:
+  - effect: NoSchedule
+    operator: Exists
+
+  # Security context: non-root group, no privilege escalation
+  # Note: SSH daemon itself needs to run as root to bind port 22, so
+  # runAsNonRoot cannot be set here — this is the accepted trade-off for a
+  # deliberate test target.
+  securityContext:
+    fsGroup: 1000
+
+  containers:
+  - name: sshd
+    # Alpine with openssh-server installed at startup — no custom image needed.
+    image: alpine:3.19
+    imagePullPolicy: IfNotPresent
+
+    # Install sshd, create weak test user, and start daemon.
+    # Credentials: pentest / password123  (intentionally weak — test only)
+    command: ["/bin/sh", "-c"]
+    args:
+    - |
+      set -e
+      apk add --no-cache openssh-server >/dev/null 2>&1
+      mkdir -p /run/sshd /etc/ssh/keys
+      # Generate host keys (stored in an emptyDir so they're ephemeral)
+      ssh-keygen -A -f /etc/ssh
+      # Create the test user
+      adduser -D -s /bin/sh pentest
+      echo "pentest:password123" | chpasswd
+      # Intentionally permissive sshd config (test target only)
+      cat > /etc/ssh/sshd_config <<'SSHCFG'
+      Port 22
+      ListenAddress 0.0.0.0
+      HostKey /etc/ssh/ssh_host_rsa_key
+      HostKey /etc/ssh/ssh_host_ecdsa_key
+      PermitRootLogin no
+      PasswordAuthentication yes
+      MaxAuthTries 6
+      MaxSessions 5
+      AuthorizedKeysFile .ssh/authorized_keys
+      UsePAM no
+      Subsystem sftp /usr/lib/ssh/sftp-server
+      SSHCFG
+      echo "[ssh-test] sshd starting (pentest / password123)"
+      exec /usr/sbin/sshd -D -e
+
+    ports:
+    - containerPort: 22
+      name: ssh
+      protocol: TCP
+
+    resources:
+      requests:
+        cpu: 50m
+        memory: 32Mi
+      limits:
+        cpu: 100m
+        memory: 64Mi
+
+    securityContext:
+      allowPrivilegeEscalation: true   # required for sshd — test target only
+      readOnlyRootFilesystem: false
+
+  restartPolicy: Never
+  terminationGracePeriodSeconds: 5
+
+---
+# NodePort service — exposes SSH on a random high port to the Minikube node IP
+apiVersion: v1
+kind: Service
+metadata:
+  name: ssh-test
+  namespace: securecloud
+  labels:
+    app: ssh-test
+    securecloud.io/test-only: "true"
+spec:
+  type: NodePort
+  selector:
+    app: ssh-test
+  ports:
+  - name: ssh
+    protocol: TCP
+    port: 22
+    targetPort: 22
+    # nodePort is deliberately omitted — Kubernetes assigns a random port
+    # in 30000–32767.  Scenario 03 auto-detects it with:
+    #   kubectl get svc ssh-test -n securecloud \
+    #     -o jsonpath='{.spec.ports[0].nodePort}'
