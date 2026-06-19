@@ -1,0 +1,45 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# requirements-data.txt
+#
+# Pinned dependencies for data download, EDA, and preprocessing work.
+# These are a subset of ml/requirements.txt with Jupyter and visualization
+# tools added.  Install into an isolated environment:
+#
+#   python -m venv .venv-data
+#   source .venv-data/bin/activate        # Linux / macOS
+#   .venv-data\Scripts\activate           # Windows
+#   pip install -r ml/data/requirements-data.txt
+#
+# Version constraints:
+#   pandas 2.2.x — required for the new Copy-on-Write default and
+#                  ArrowDtype support used in the preprocessing pipelines.
+#   numpy  1.26.x — last series before NumPy 2.0 ABI break; keeps
+#                   compatibility with scikit-learn 1.4.x and TF 2.15.
+#   scikit-learn 1.4.x — must match ml/requirements.txt exactly so that
+#                   IForestDetector joblib files are portable between
+#                   the data env and the training env.
+# ──────────────────────────────────────────────────────────────────────────────
+
+# ── Core data stack ───────────────────────────────────────────────────────────
+pandas==2.2.1
+numpy==1.26.4
+scipy==1.12.0
+
+# ── Visualisation ─────────────────────────────────────────────────────────────
+matplotlib==3.8.3
+seaborn==0.13.2
+
+# ── Jupyter ───────────────────────────────────────────────────────────────────
+jupyter==1.0.0
+jupyterlab==4.1.5
+notebook==7.1.3
+ipykernel==6.29.4
+ipywidgets==8.1.2
+
+# ── ML (kept in sync with ml/requirements.txt) ────────────────────────────────
+scikit-learn==1.4.2
+
+# ── Utilities ────────────────────────────────────────────────────────────────
+tqdm==4.66.2          # progress bars for large CSV reads
+pyarrow==15.0.2       # parquet write for processed datasets (pandas backend)
+requests==2.31.0      # used in download-datasets.sh curl fallback
