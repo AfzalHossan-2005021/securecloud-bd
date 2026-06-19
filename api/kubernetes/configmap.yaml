@@ -1,0 +1,25 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: securecloud-api-config
+  namespace: securecloud
+  labels:
+    app: securecloud-api
+    component: config
+data:
+  # Model artefact locations (mounted via PVC at /models)
+  MODEL_DIR: "/models"
+  IFOREST_MODEL_PATH: "/models/iforest_best.joblib"
+  LSTM_MODEL_PATH: "/models/lstm_ae_best"
+
+  # Ensemble weights — must match the values used during grid-search training.
+  # Do NOT change without re-running ml/experiments/train_lstm_ae.py.
+  IFOREST_WEIGHT: "0.4"
+  LSTM_WEIGHT: "0.6"
+
+  # Ensemble decision threshold.  Flows with ensemble_score >= this value
+  # are classified as anomalous.
+  ENSEMBLE_THRESHOLD: "0.5"
+
+  # Uvicorn / application log level (DEBUG | INFO | WARNING | ERROR)
+  LOG_LEVEL: "INFO"

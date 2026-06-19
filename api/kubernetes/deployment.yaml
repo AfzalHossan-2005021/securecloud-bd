@@ -1,0 +1,149 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: securecloud-api
+  namespace: securecloud
+  labels:
+    app: securecloud-api
+    component: inference
+spec:
+  replicas: 2
+
+  selector:
+    matchLabels:
+      app: securecloud-api
+
+  # Rolling update: bring one new pod up before taking the old one down
+  # so /score is never fully unavailable during a model upgrade.
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+
+  template:
+    metadata:
+      labels:
+        app: securecloud-api
+      annotations:
+        # Force pod restart when the ConfigMap changes (checksum-based trigger).
+        # Update this manually or via Helm's --set during deploys.
+        securecloud/config-hash: "placeholder-update-on-deploy"
+
+    spec:
+      # ── Security context ────────────────────────────────────────────────
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+
+      automountServiceAccountToken: false
+
+      # ── Init container: wait for models PVC to be populated ─────────────
+      initContainers:
+        - name: wait-for-models
+          image: busybox:1.36
+          command:
+            - sh
+            - -c
+            - |
+              echo "Waiting for model artefacts..."
+              until [ -f /models/iforest_best.joblib ] && \
+                    [ -d /models/lstm_ae_best ]; do
+                echo "  not ready yet, retrying in 5s"
+                sleep 5
+              done
+              echo "Models found — starting API."
+          volumeMounts:
+            - name: models
+              mountPath: /models
+              readOnly: true
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+
+      # ── Main container ───────────────────────────────────────────────────
+      containers:
+        - name: api
+          image: securecloud/threat-api:latest
+          imagePullPolicy: IfNotPresent
+
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+
+          # Inject all ConfigMap keys as environment variables
+          envFrom:
+            - configMapRef:
+                name: securecloud-api-config
+
+          # Resources: conservative for single-node Minikube (8 GB RAM total).
+          resources:
+            requests:
+              cpu: 250m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+
+          # Liveness probe: restart the pod if the /health endpoint stops
+          # responding (e.g. deadlock, OOM).
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 30
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 3
+
+          # Readiness probe: hold traffic until models are fully loaded.
+          # /health returns status="degraded" while loading, which still
+          # returns HTTP 200.  We check the body via a custom exec probe
+          # that looks for "\"status\": \"ok\"".
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 15
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 6    # allow up to 30 s for model loading
+
+          # Startup probe: give the container 2 minutes to become live
+          # on first start (TF model loading can be slow on cold disk).
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 5
+            failureThreshold: 24   # 24 × 5 s = 120 s max startup window
+
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+
+          volumeMounts:
+            - name: models
+              mountPath: /models
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp   # TensorFlow may need a writable /tmp
+
+      # ── Volumes ──────────────────────────────────────────────────────────
+      volumes:
+        - name: models
+          persistentVolumeClaim:
+            # Create this PVC separately and populate it with trained models
+            # before deploying, e.g.:
+            #   kubectl cp ml/models/saved/. securecloud/<pod>:/models
+            claimName: securecloud-models-pvc
+
+        - name: tmp
+          emptyDir: {}

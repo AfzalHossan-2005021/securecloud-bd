@@ -1,0 +1,22 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: securecloud-api
+  namespace: securecloud
+  labels:
+    app: securecloud-api
+    component: inference
+  annotations:
+    # Prometheus scrape config — works with the prometheus-operator ServiceMonitor
+    prometheus.io/scrape: "true"
+    prometheus.io/path: "/metrics"
+    prometheus.io/port: "8080"
+spec:
+  type: ClusterIP
+  selector:
+    app: securecloud-api
+  ports:
+    - name: http
+      protocol: TCP
+      port: 8080
+      targetPort: 8080
